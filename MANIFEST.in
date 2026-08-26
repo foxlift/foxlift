@@ -1,0 +1,4 @@
+# ABOUTME: Keeps development-only tests out of published source distributions.
+# ABOUTME: Leaves package code, project metadata, the README, and licenses in the archive.
+
+prune tests

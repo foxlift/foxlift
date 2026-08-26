@@ -1,0 +1,36 @@
+# ABOUTME: Collects focused FoxLift feature requests with a concrete user need.
+# ABOUTME: Reminds requesters not to submit restricted samples or ReFox-derived material.
+name: Feature request
+description: Propose a change to FoxLift's supported behavior
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not attach proprietary or confidential material, ReFox output,
+        ReFox-derived material, or any input you are not authorized to share.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What authorized workflow or file shape cannot FoxLift handle today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Requested outcome
+      description: Describe the smallest behavior that would solve the problem.
+    validations:
+      required: true
+  - type: checkboxes
+    id: provenance
+    attributes:
+      label: Input provenance
+      options:
+        - label: Any submitted sample is authorized for public redistribution.
+          required: true
+        - label: This request contains no ReFox output or ReFox-derived material.
+          required: true

@@ -1,0 +1,153 @@
+<!-- ABOUTME: Introduces FoxLift with a direct product explanation, origin story, and release status. -->
+<!-- ABOUTME: Keeps the pre-release landing page concise while crediting the work and tools behind it. -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="theme-color" content="#101212" />
+    <meta
+      name="description"
+      content="FoxLift is an open-source Visual FoxPro decompiler. Compiled binaries in, functionally equivalent and rebuildable projects out."
+    />
+    <meta name="robots" content="index, follow" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="FoxLift" />
+    <meta property="og:title" content="FoxLift | Visual FoxPro decompiler" />
+    <meta
+      property="og:description"
+      content="Compiled Visual FoxPro binaries in. Functionally equivalent, rebuildable projects out."
+    />
+    <meta property="og:url" content="https://foxlift.dev/" />
+    <meta property="og:image" content="https://foxlift.dev/images/foxlift-og.webp" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="FoxLift | Visual FoxPro decompiler" />
+    <meta
+      name="twitter:description"
+      content="Compiled Visual FoxPro binaries in. Functionally equivalent, rebuildable projects out."
+    />
+    <meta name="twitter:image" content="https://foxlift.dev/images/foxlift-og.webp" />
+    <link rel="canonical" href="https://foxlift.dev/" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <title>FoxLift | Visual FoxPro decompiler</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <header class="site-header">
+      <nav class="shell nav" aria-label="Main navigation">
+        <a class="brand" href="#top" aria-label="FoxLift home">
+          <img src="/images/foxlift-mark.webp" width="42" height="42" alt="" fetchpriority="high" />
+          <span>FoxLift</span>
+        </a>
+        <p class="release-note"><span aria-hidden="true"></span>Open source release coming soon</p>
+      </nav>
+    </header>
+
+    <main id="main-content">
+      <section class="hero" id="top">
+        <div class="shell hero-grid">
+          <div class="hero-copy">
+            <h1>Visual FoxPro decompiler.</h1>
+            <p class="hero-summary">
+              Compiled VFP binaries in. Functionally equivalent, rebuildable projects out.
+            </p>
+          </div>
+
+          <dl class="hero-facts" aria-label="FoxLift facts">
+            <div>
+              <dt>≈ 2B</dt>
+              <dd>model tokens spent</dd>
+            </div>
+            <div>
+              <dt>199 / 199</dt>
+              <dd>Tier A canaries pass</dd>
+            </div>
+            <div>
+              <dt>Offline</dt>
+              <dd>for pure decompilation</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="section story" id="story">
+        <div class="shell story-grid">
+          <div class="story-copy" data-reveal>
+            <h2>Built because I needed it.</h2>
+            <p class="lead">
+              FoxLift started as a personal need and a weekend project. The available tools did not fit a modern CLI and CI workflow, so I started building one.
+            </p>
+            <p>
+              Roughly two billion model tokens have gone into format research, oracle probes, corpus sweeps, failed hypotheses, code, and review.
+            </p>
+            <p>
+              The standard is simple: recovered projects must rebuild and behave like the compiled input. Readable guesses are not enough.
+            </p>
+          </div>
+
+        </div>
+      </section>
+
+      <section class="section process" id="process">
+        <div class="shell process-grid">
+          <div class="process-heading" data-reveal>
+            <h2>What it does.</h2>
+            <p>FoxLift follows a measured path from binary containers back to buildable VFP projects.</p>
+          </div>
+
+          <ol class="process-list" data-reveal>
+            <li>
+              <span>01</span>
+              <div><h3>Read</h3><p>Find modules, forms, classes, reports, menus, and resources.</p></div>
+            </li>
+            <li>
+              <span>02</span>
+              <div><h3>Lift</h3><p>Decode measured bytecode, symbols, expressions, and control flow.</p></div>
+            </li>
+            <li>
+              <span>03</span>
+              <div><h3>Write</h3><p>Emit functionally equivalent VFP source and project artifacts.</p></div>
+            </li>
+            <li>
+              <span>04</span>
+              <div><h3>Verify</h3><p>Rebuild in VFP9 and compare canonical bytecode.</p></div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section thanks">
+        <div class="shell thanks-inner" data-reveal>
+          <p class="thanks-date">22–28 Aug</p>
+          <div>
+            <h2>Thanks, OpenRouter and Ox Alpha.</h2>
+            <p>
+              Ox Alpha was available free through OpenRouter from August 22 to 28. That made many long reverse-engineering loops possible.
+            </p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-inner">
+        <a class="brand footer-brand" href="#top" aria-label="FoxLift home">
+          <img src="/images/foxlift-mark.webp" width="42" height="42" alt="" />
+          <span>FoxLift</span>
+        </a>
+        <p>Open-source release coming soon.</p>
+      </div>
+    </footer>
+
+    <script src="../scripts/site.ts"></script>
+  </body>
+</html>
+
+<style is:global>
+  @import "../styles/global.css";
+</style>

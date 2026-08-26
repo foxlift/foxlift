@@ -1,0 +1,5 @@
+? main
+DEFINE CLASS probe AS Custom
+ PROCEDURE m1
+ ENDPROC
+ENDDEFINE
