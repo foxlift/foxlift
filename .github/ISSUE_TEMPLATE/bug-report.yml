@@ -1,0 +1,73 @@
+# ABOUTME: Collects reproducible FoxLift bug reports without soliciting restricted input files.
+# ABOUTME: Requires reporters to confirm clean-room and authorization constraints.
+name: Bug report
+description: Report a reproducible FoxLift defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not attach proprietary or confidential material, licensed VFP media,
+        ReFox output, ReFox-derived material, or any input you are not authorized
+        to share. Report vulnerabilities privately through the Security tab.
+  - type: input
+    id: version
+    attributes:
+      label: FoxLift version
+      placeholder: "0.1.0 or commit SHA"
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.14.7"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Include the exact command after removing sensitive paths and values.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: Describe or attach only material you created or may redistribute publicly.
+  - type: checkboxes
+    id: provenance
+    attributes:
+      label: Input provenance
+      options:
+        - label: Any submitted sample is authorized for public redistribution.
+          required: true
+        - label: This report contains no ReFox output or ReFox-derived material.
+          required: true

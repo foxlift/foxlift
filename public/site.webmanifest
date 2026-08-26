@@ -1,0 +1,16 @@
+{
+  "name": "FoxLift",
+  "short_name": "FoxLift",
+  "description": "Open-source Visual FoxPro decompiler",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#101212",
+  "theme_color": "#101212",
+  "icons": [
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

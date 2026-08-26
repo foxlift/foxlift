@@ -1,0 +1,19 @@
+// ABOUTME: Deploys the generated Astro site through Cloudflare Workers Static Assets.
+// ABOUTME: Serves the custom Astro 404 page for routes that do not match a built asset.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "foxlift",
+  "account_id": "f8801c7e8853a113a25f8b52fd9ceec1",
+  "compatibility_date": "2026-08-24",
+  "routes": [
+    {
+      "pattern": "foxlift.dev",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "directory": "./dist",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  }
+}

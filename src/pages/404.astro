@@ -1,0 +1,26 @@
+<!-- ABOUTME: Provides a branded not-found page for the static Cloudflare Workers deployment. -->
+<!-- ABOUTME: Gives visitors a clear route back to the FoxLift landing page. -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="theme-color" content="#101212" />
+    <meta name="robots" content="noindex" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <title>Floor not found | FoxLift</title>
+  </head>
+  <body class="not-found-page">
+    <main class="not-found">
+      <img src="/images/foxlift-mark.webp" width="256" height="256" alt="" />
+      <p class="eyebrow">Floor not found</p>
+      <h1>This elevator does not stop here.</h1>
+      <p>The page may have moved, but FoxLift is still going up.</p>
+      <a class="button" href="/">Back to FoxLift</a>
+    </main>
+  </body>
+</html>
+
+<style is:global>
+  @import "../styles/global.css";
+</style>

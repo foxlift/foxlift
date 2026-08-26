@@ -1,0 +1,124 @@
+{
+ "provenance": {
+  "date": "2026-08-27",
+  "repo_commit": "f3f590df49e3ad7108d8726b3083dd4d3e07e530",
+  "compiler": "Visual FoxPro 9 (SP2) driven via foxlift.oracle.compile_dir, one batched invocation per round under foxlift.vmlock",
+  "criterion": "per-section statement frames byte-equal AND symbol tables equal (foxlift.compare); raw .fxp container bytes are never compared \u2014 they embed compile timestamps and the source path",
+  "compile_wall_s": {
+   "round1": 3.9,
+   "round2": 4.9
+  }
+ },
+ "programs": {
+  "counterform": {
+   "authored_source": "demo/src/counterform.prg",
+   "authored_source_sha256": "630344148008f68dbf03707ee4d8da4e639c74a82776e004bd2b4503379340a1",
+   "compiled_fxp_sha256": "bf44a4efe1bf0d379262a3fc3104ef5a53da731136a347fea260d1995cf38d08",
+   "inspect": {
+    "command": "python3 -m foxlift inspect build/demo/fxp/counterform.fxp --json",
+    "exit_code": 0,
+    "result": {
+     "file": "build/demo/fxp/counterform.fxp",
+     "format": "fxp",
+     "size": 899,
+     "module_count": 1,
+     "modules": [
+      {
+       "offset": 0,
+       "statements": 22,
+       "known": 22,
+       "verbatim_text": 0,
+       "symbols_parsed": true,
+       "symbol_count": 15
+      }
+     ]
+    }
+   },
+   "decompile": {
+    "command": "python3 -m foxlift decompile build/demo/fxp/counterform.fxp -o build/demo/decompiled/counterform --json",
+    "exit_code": 0,
+    "result": {
+     "outdir": "build/demo/decompiled/counterform",
+     "modules": 1,
+     "verified": true
+    }
+   },
+   "decompiled_source_sha256": "820ac3a3264f2a17f413386311a12d26e0c70127823085ac6672caed1fba5ff5",
+   "recompiled_fxp_sha256": "617ef37fc3d9954e15d5785051d5666ffb2552a8a0b100d3957746a72e0b472c",
+   "sections": [
+    {
+     "section": 0,
+     "statements": 22,
+     "equal": true,
+     "reason": "identical"
+    }
+   ],
+   "roundtrip": {
+    "equal": true,
+    "reason": "all original sections matched in order"
+   }
+  },
+  "partsbin": {
+   "authored_source": "demo/src/partsbin.prg",
+   "authored_source_sha256": "7a7620b9b52b98ae8eaa057afc01c385119cd343e1a70b19b57c42bd4c232202",
+   "compiled_fxp_sha256": "96444405c995cd4bcf7ad48051474452acdb976349b003457367a24f5f1dfafd",
+   "inspect": {
+    "command": "python3 -m foxlift inspect build/demo/fxp/partsbin.fxp --json",
+    "exit_code": 0,
+    "result": {
+     "file": "build/demo/fxp/partsbin.fxp",
+     "format": "fxp",
+     "size": 1018,
+     "module_count": 1,
+     "modules": [
+      {
+       "offset": 0,
+       "statements": 30,
+       "known": 30,
+       "verbatim_text": 0,
+       "symbols_parsed": true,
+       "symbol_count": 11
+      }
+     ]
+    }
+   },
+   "decompile": {
+    "command": "python3 -m foxlift decompile build/demo/fxp/partsbin.fxp -o build/demo/decompiled/partsbin --json",
+    "exit_code": 0,
+    "result": {
+     "outdir": "build/demo/decompiled/partsbin",
+     "modules": 1,
+     "verified": true
+    }
+   },
+   "decompiled_source_sha256": "bc4948e88328076c0ae96cc421b68e34aa87f5ead91704b2e4729dbf3f06020c",
+   "recompiled_fxp_sha256": "6db0d4e2972d6ba2102ad13565c85e2b83a0e78ed77049e8ce1fab4f42e49884",
+   "sections": [
+    {
+     "section": 0,
+     "statements": 30,
+     "equal": true,
+     "reason": "identical"
+    }
+   ],
+   "roundtrip": {
+    "equal": true,
+    "reason": "all original sections matched in order"
+   }
+  }
+ },
+ "negative_control": {
+  "description": "one literal mutated (\"INSERT INTO parts VALUES ('AX-0048', 'Hex bolt M6', 500, 0.50)\" -> \"INSERT INTO parts VALUES ('AX-0048', 'Hex bolt M6', 501, 0.50)\") and recompiled; the comparator must say unequal",
+  "equal": false,
+  "reason": "original section 1: frame 1 differs",
+  "as_expected": true
+ },
+ "summary": {
+  "programs": 2,
+  "sections_compared": 2,
+  "sections_byte_identical": 2,
+  "all_inspect_exit_0": true,
+  "all_decompile_exit_0": true,
+  "negative_control_unequal": true
+ }
+}

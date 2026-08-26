@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "foxlift"
+version = "0.1.0"
+description = "Visual FoxPro decompiler — compiled binary in, buildable project out"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "COPYRIGHT"]
+authors = [
+    {name = "Timo Bejan"},
+]
+keywords = ["visual-foxpro", "vfp", "decompiler", "reverse-engineering"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Disassemblers",
+    "Topic :: Utilities",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.3"]
+
+[project.scripts]
+foxlift = "foxlift.cli:main"
+
+[project.urls]
+Homepage = "https://foxlift.dev"
+Documentation = "https://foxlift.dev"
+Repository = "https://github.com/foxlift/foxlift"
+Issues = "https://github.com/foxlift/foxlift/issues"
+Changelog = "https://github.com/foxlift/foxlift/releases"
+"Commercial licensing" = "https://github.com/foxlift/foxlift/blob/main/COMMERCIAL-LICENSE.md"
+
+[tool.setuptools.packages.find]
+include = ["foxlift*"]

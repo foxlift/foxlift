@@ -1,0 +1,7 @@
+# ABOUTME: Directs reports through structured issue forms instead of unstructured blank issues.
+# ABOUTME: Keeps security reports in GitHub's private vulnerability reporting flow.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/foxlift/foxlift/security/advisories/new
+    about: Send vulnerability details privately to the maintainers.
