@@ -9,6 +9,10 @@
     {
       "pattern": "foxlift.dev",
       "custom_domain": true
+    },
+    {
+      "pattern": "www.foxlift.dev",
+      "custom_domain": true
     }
   ],
   "assets": {
