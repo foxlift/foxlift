@@ -41,8 +41,3 @@ htmlcov/
 *.key
 *.p12
 *.pfx
-
-# Astro and Cloudflare launch-site artifacts.
-node_modules/
-.astro/
-.wrangler/

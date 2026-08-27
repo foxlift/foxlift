@@ -1,7 +1,0 @@
-// ABOUTME: Applies Astro's strict TypeScript checks to the landing page scripts.
-// ABOUTME: Keeps browser interaction code type-checked without emitting JavaScript separately.
-{
-  "extends": "astro/tsconfigs/strict",
-  "include": [".astro/types.d.ts", "**/*"],
-  "exclude": ["dist"]
-}

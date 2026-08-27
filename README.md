@@ -45,19 +45,6 @@ FoxLift works offline and does not require Visual FoxPro at runtime.
 
 A worked example ships in [demo/](demo/): authored source, compiled on a real VFP9, decompiled with this CLI, recompiled byte-identical — with every exit code, hash, and per-section verdict recorded in its receipts.
 
-## Website
-
-The FoxLift landing page is an Astro static site deployed through Cloudflare Workers.
-
-```bash
-npm install
-npm run dev
-npm run check
-npm run build
-```
-
-`npm run deploy` builds the site and publishes the `dist/` assets with Wrangler.
-
 ## Scope
 
 FoxLift targets unprotected Visual FoxPro 9 artifacts, including `.fxp`, `.app`, `.exe`, `.scx`, `.vcx`, `.frx`, and `.mnx` files. Coverage varies by format and language feature while development continues.

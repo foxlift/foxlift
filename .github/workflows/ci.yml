@@ -93,25 +93,6 @@ jobs:
       - name: Smoke-test the installed CLI
         run: python -I -m foxlift --help
 
-  website:
-    name: Website
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Check out the repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
-        with:
-          node-version: "22"
-          cache: npm
-      - name: Install website dependencies
-        run: npm ci
-      - name: Check and build the website
-        run: npm run build
-
   required:
     name: required
     if: always()
@@ -119,7 +100,6 @@ jobs:
       - static
       - test
       - package
-      - website
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -128,9 +108,7 @@ jobs:
           STATIC_RESULT: ${{ needs.static.result }}
           TEST_RESULT: ${{ needs.test.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
-          WEBSITE_RESULT: ${{ needs.website.result }}
         run: |
           test "$STATIC_RESULT" = success
           test "$TEST_RESULT" = success
           test "$PACKAGE_RESULT" = success
-          test "$WEBSITE_RESULT" = success
