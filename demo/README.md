@@ -84,7 +84,6 @@ nothing and do not disturb the round trip.
 python3 demo/make_receipts.py
 ```
 
-This drives a licensed VFP9 over SSH (see `docs/ORACLE.md`), compiles both rounds as batched
-single invocations, runs the shipped CLI as subprocesses, and writes the receipts. Without a
-VFP9 oracle configured you can still verify the shipped artifacts' hashes and re-run steps 2–5
-above against your own VFP9.
+This drives a licensed VFP9 over SSH, compiles both rounds as batched single invocations, runs
+the shipped CLI as subprocesses, and writes the receipts. Without a VFP9 oracle configured you
+can still verify the shipped artifacts' hashes and re-run steps 2–5 above against your own VFP9.
