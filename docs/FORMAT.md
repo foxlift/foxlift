@@ -33,9 +33,26 @@ across versions — do not repeat that inference.
 ## 2. Header
 
 Immediately after the magic is a block of u32 fields, most of them section offsets and lengths.
-**The header layout is not mapped.** Its size varies with the module's name and symbol counts,
-which is why code sections are currently located by validation (§3) rather than by reading a
-header field. Mapping this properly is open work and would remove the search.
+The front-header field layout is still not fully mapped — code sections are located by
+validation (§3) rather than by reading a length field.
+
+**Class identities are not in that front header.** Oracle r43-fxphdr: DEFINE CLASS name,
+AS base, and OLEPUBLIC live in a directory after the last section terminator and its
+`55` symbol table (count may be 0):
+
+```
+<u16 nlen> <name bytes> <u16 blen> <base bytes> <u16 unk0> <u16 unk1> <u16 ole>
+```
+
+Name and base keep the stored source case. `ole` is 1 for `OLEPUBLIC`, 0 otherwise.
+`unk0` grows when PROCEDURE/FUNCTION members are added; it is not a simple member
+count (PROCEDURE and FUNCTION differ). Method names ride a second directory
+immediately before the class-init section: `<u16 nlen> <name> <u32> <u32>`, with
+the last u32 overlapping the next section marker. Names include ADD OBJECT
+events (`object.event`). Each class-init `a2`/`a3`/`9e` INT32 is a 1-based
+index into that list (public / PROTECTED / HIDDEN). A non-class program has
+zero class records. See `foxlift.container.class_identities` and
+`probes/oracle_harvest/round43_fxphdr_batch.py`.
 
 ## 3. Code sections
 

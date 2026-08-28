@@ -95,7 +95,8 @@ ON_PAGE_SELECTOR = 0xBE     # value collides with ENDTRY_LEAD; context-local
 # '/n7' in r1).
 RUN_LEAD = 0x43
 # ORACLE round-25 forced_rules[3] (c1 = `53`; corpus cboHierarchy s1 stmt[7]):
-# ZAP is a bare one-byte statement.
+# ZAP is a bare one-byte statement. r42-zapin: ZAP IN <alias> is
+# 53 16 f7 <u16> (AATest frstestharn s5[0] 5316f70000).
 ZAP_LEAD = 0x53
 # ORACLE CMD_SWEEP.md row RECALL (probes/oracle_harvest/CMD_SWEEP.md line 141:
 # authored source 'RECALL' compiled to bare `3a`); the round-30 followup carries
@@ -200,7 +201,10 @@ CASE_CLAUSE = 0x0C   # 0c fc <cond> fd f9 05 <u16>: CASE clause; u16 = next-clau
                      # end-of-statement (oaremotion1.scx::rtx s14 clauses).
 ENDCASE_LEAD = 0x1C
 OTHERWISE_LEAD = 0x32   # 32 f9 05 <u16>: OTHERWISE clause; u16 = ENDCASE prefix -
-                        # code_base (same anchor family), forced by _outputdialog  # bare ENDCASE
+                        # code_base (same anchor family), forced by _outputdialog.
+                        # Round-42 adds the long-jump width 32 e9 00 <u32>, length
+                        # exactly 7 (listener.vcx u32-framed methods; oracle
+                        # sibling-forced and overflow-forced compiles).  # bare ENDCASE
 WAIT_CLEAR = 0x52   # 52 2c fc <expr>: WAIT WINDOW <expr>; 52 0c: WAIT CLEAR.
                     # FORCED subset only — a variant with an extra 3a byte after WINDOW
                     # and AT-clause forms exist whose discriminator is UNMEASURED (same
@@ -240,8 +244,20 @@ EXIT_LEAD = 0x21     # bare EXIT
 DEFINE_LEAD = 0x73   # ONE construct: keyword byte selects the object.
 DEFINE_WINDOW_KW = 0x2C   # DEFINE WINDOW ... (m1 replica byte-exact); also the
                           # WINDOW keyword under leads 09/3c below. NOT an lvalue.
+                          # r42-clear: CLEAR WINDOW is 0e 2c (AATest frstestharn
+                          # s38[4]). WINDOWS / WINDOW w1 collapse to the same.
 DEFINE_POPUP_KW = 0xC6    # DEFINE POPUP / ACTIVATE POPUP object keyword
 DEFINE_BAR_KW = 0x06      # DEFINE BAR <n> OF <popup> (g3/g4)
+DEFINE_PAD_KW = 0xBC      # DEFINE PAD <name> OF _MSYSMENU (r43-pad); 0xBC is
+                          # FINALLY / ON PAD / ACTIVATE elsewhere — lead 0x73
+                          # decides
+PAD_BEFORE_MARK = 0xBE    # BEFORE <pad> = be f7<sym> (r43-pad); WINDOW CLOSE
+                          # is the same byte under DEFINE WINDOW
+PAD_MARK_CLAUSE = 0xC7    # MARK <expr> (r43-pad); STEP_MARK in FOR, position
+                          # decides
+PAD_NEGOTIATE_MARK = 0x54 # NEGOTIATE LEFT = 54 58 (r43-pad); assignment lead
+                          # 0x54 elsewhere
+PAD_NEGOTIATE_LEFT = 0x58
 DEFINE_FROM_MARK = 0x15   # FROM-list intro (m1/g1)
 DEFINE_BAR_OF = 0xC3      # BAR OF popup (c3 f7<sym>); byte collides with
                           # C3_ORDER (SQL namespace) — position decides
@@ -295,6 +311,9 @@ BAR_PROMPT_MARK = 0x22        # BAR PROMPT fc<str>fd (g3)
 BAR_SKIPFOR_MARK = (0xC9, 0x13)  # BAR SKIP FOR fc<expr>fd (g4)
 BAR_PICTURE_MARK = 0xC2       # BAR PICTURE fc<str>fd (g3/g4); collides with
                               # USE_SHARED_FLAG etc. — lead-0x73 context only
+BAR_PICTRES_MARK = 0x5F       # BAR PICTRES fc ec <id> (r43-pictres); statement-
+                              # final fd is reader-stripped. PICTURE is 0xc2
+                              # and does not emit 0x5f.
 ACTIVATE_POPUP_LEAD = 0x74    # 74 c6 f7<sym> = ACTIVATE POPUP (g5; CMD_SWEEP ACTIVATE=74)
 ACTIVATE_SCREEN_KW = 0x26     # 74 26 = ACTIVATE SCREEN (audit-B order-4 corpus alignment,
                               # winsock.vcx::Olecontrol1 stmt[4] vs stored source line 10);
@@ -317,9 +336,10 @@ CREATE_LEAD = 0x13            # bare CREATE <name> = 13 fb<name> (CMD_SWEEP);
                               # (SCAN) — context decides. CURSOR owns 0x68.
 CREATE_REPORT_KW = 0x33       # 33 under lead 0x13: CREATE REPORT (round-26 c3);
                               # byte is PACK's statement lead elsewhere — position decides
-CREATE_CURSOR_LEAD = 0x68     # 68 bd fb<name> 02 <fields> 03 (round-26 c1/c2).
-                              # DISCOVERY: the cursor NAME occupies SYMBOL SLOT 0
-                              # ahead of field names though carried as an fb string.
+CREATE_CURSOR_LEAD = 0x68     # 68 {bd|31} fb<name> 02 <fields> 03 (round-26 c1/c2).
+                              # 0xBD = CREATE CURSOR; 0x31 = CREATE TABLE (round-42
+                              # clause batch). DISCOVERY: the NAME occupies SYMBOL
+                              # SLOT 0 ahead of field names though carried as an fb string.
 INSERT_LEAD = 0x72            # 72 bc <target-group> 15 c2 =
                               # INSERT INTO (<expr>) FROM MEMVAR (round-26 i1)
 SQL_INTOTABLE_MARK = (0xBC, 0x31)  # INTO TABLE (<expr>) vs INTO CURSOR bc bd
@@ -365,6 +385,7 @@ SET_ONOFF_NAMES = {
     0x2E: "SAFETY",
     0x30: "STATUS",     0x31: "STEP",        0x32: "TALK",
     0x41: "COMPATIBLE",                      # corpus alignment (see above)
+    0x54: "RESOURCE",                        # HARVEST 43/43; r42 I9 ON/OFF
     0x5A: "NOTIFY",     0x5F: "MULTILOCKS",
     0x60: "TEXTMERGE",                       # corpus alignment (see above)
     0x83: "SYSFORMATS",  0x85: "ASSERTS",    # ASSERTS corpus-aligned (see above)
@@ -408,6 +429,7 @@ SET_VALUE_TO_NAMES = {
     0x02: "BELL",       0x0E: "DEFAULT",     0x1A: "FILTER",
     0x24: "MEMOWIDTH",  0x26: "MESSAGE",     0x28: "ORDER",
     0x29: "PATH",       0x2B: "PROCEDURE",   0x3B: "POINT",
+    0x54: "RESOURCE",   # r42-setres: 47 54 28 fc <expr> [03]; ON/OFF is 47 54 1f/20
     0x62: "LIBRARY",    0x79: "KEY",         0x7E: "CLASSLIB",
     0x8A: "DEBUGOUT",
 }
@@ -429,6 +451,14 @@ SET_NOSHOW_MARK = 0xCE     # TEXTMERGE ON NOSHOW tail ('47 60 20 ce' x9)
 # (c2 = TO-MEMVAR target marker; one carrier, exact byte sequence pinned.)
 SET_TEXTMERGE_ID = 0x60
 SET_TEXTMERGE_MEMVAR_MARK = 0xC2
+# SET TEXTMERGE DELIMITERS TO — ORACLE-MEASURED round-42 I9 (vmlock r42-set):
+#   'SET TEXTMERGE DELIMITERS TO'                         -> 47 60 be 07
+#   'SET TEXTMERGE DELIMITERS TO m.leftDelim, m.rightDelim'
+#       -> 47 60 be fc f5 0d f7 <left> fd 07 fc f5 0d f7 <right>
+# be = DELIMITERS in the TEXTMERGE slot (other slots reuse be as DELIMITED/
+# LINKED). 07 is ARGJOIN; the reset form is ARGJOIN with no operands. The
+# TO word is not on the wire (REPORTBEHAVIOR precedent).
+SET_TEXTMERGE_DELIMITERS_MARK = 0xBE
 
 # SET ORDER with work-area clause (foxcharts.vcx::foxcharts s59 stmt46 /
 # xfrxlib.vcx s48 stmt15): '47 28 16 f7 <alias> 28 fb "0"' <->
@@ -451,6 +481,26 @@ SET_REPORTBEHAVIOR_ID = 0x93
 # NOTIFY CURSOR sub-keyword (fxmemberdatascript.vcx s22/s23): '47 5a bd 20|1f'
 # <-> 'SET NOTIFY CURSOR ON|OFF'; plain NOTIFY ON/OFF keeps the generic path.
 SET_NOTIFY_CURSOR_MARK = 0xBD
+
+# SET SYSMENU (r43-sysmenu / r37 E09): setting-id 0x59. Measured forms:
+#   47 59 28       SET SYSMENU TO
+#   47 59 28 0e    SET SYSMENU TO DEFAULT   (0e is the same DEFAULT keyword as
+#                                           SET PRINTER TO DEFAULT)
+#   47 59 bc       SET SYSMENU AUTOMATIC
+#   47 59 20 / 1f  SET SYSMENU ON / OFF
+#   47 59 25       SET SYSMENU SAVE
+#   47 59 cd       SET SYSMENU NOSAVE
+# TO <pad> / TO <pad>, <pad> is 47 59 28 fc ec <id> [fd 07 fc ec <id> …]
+# (r43-sysmenu extra: _MFILE = 0x23, _MEDIT = 0x39). Pad ids are a
+# different namespace from MENU_BAR_IDS (0x39 there is _MED_UNDO).
+SET_SYSMENU_ID = 0x59
+SET_SYSMENU_AUTOMATIC_MARK = 0xBC
+SET_SYSMENU_SAVE_MARK = 0x25
+SET_SYSMENU_NOSAVE_MARK = 0xCD
+SET_SYSMENU_PAD_IDS = {
+    0x23: "_MFILE",
+    0x39: "_MEDIT",
+}
 
 # SET DATE setting id: '47 0b 28 fb <str>' <-> stored source
 # 'SET DATE TO ANSI LONG' (oaremotionweb.scx::rtx Init). The compiler keeps only the
@@ -519,6 +569,14 @@ FINALLY_LEAD = 0xBC  # bc f9 05 <u16>: FINALLY clause; target = matching ENDTRY
 APPEND_LEAD = 0x06   # 06 <body>: APPEND command (Guineu APPEND=0x06); context
                      # disambiguates from ADD(0x06) operator via statement position.
 NODEFAULT_LEAD = 0xAC   # bare NODEFAULT statement (Guineu NODEFAULT=0xAC)
+CLASS_INIT_METHOD = 0xA2  # a2 e9 00 <u32le index>: class-init PUBLIC
+                          # method registration (r43-class / r43-a3).
+CLASS_INIT_PROTECTED = 0xA3  # PROTECTED PROCEDURE/FUNCTION (r43-a3)
+CLASS_INIT_HIDDEN = 0x9E     # HIDDEN PROCEDURE/FUNCTION (r43-a3)
+                          # Same e9 00 <u32le> envelope as 0xa2. Not a
+                          # source line — the member body is its own section.
+PROTECTED_LEAD = 0xA1     # a1 f7 <u16>: PROTECTED <prop> in class-init
+                          # (r43-class). Assignment is a following 54.
 
 # EXTERNAL command (Guineu CommandTokens EXTERNAL=0x90). Corpus-measured clause
 # bytes under this lead, each forced by its own stored source line:
@@ -579,9 +637,12 @@ LOCATE_LEAD = 0x2D   # 2d 13 fc <rpn-to-end>: LOCATE FOR <cond> — no closing f
                      # Variants whose RPN ends mid-operator stay Unsupported.
 USE_LEAD = 0x51     # bare USE statement (forced: source 'USE' after TABLEREVERT
                     # sequences); operand forms unforced
-SCATTER_LEAD = 0x5E # round-17 oracle-measured forms ONLY (probes/oracle_harvest/
+SCATTER_LEAD = 0x5E # round-17 oracle-measured forms (probes/oracle_harvest/
                     # round17_streams.json): 5e 28 f7 <arr> = SCATTER TO <array>;
-                    # 5e 1b c2 = SCATTER MEMVAR MEMO. Every other 5e shape stays
+                    # 5e 1b c2 = SCATTER MEMVAR MEMO. Round-42 I8 exact-length
+                    # extras (round42_scatter_streams.json): 5e 1b 4a f7 <sym>
+                    # = SCATTER MEMO NAME <bare>; 5e 08 1b 4a f7 <sym> =
+                    # SCATTER MEMO BLANK NAME <bare>. Every other 5e shape stays
                     # Unsupported. Selector bytes are CONTEXTUAL beneath this lead,
                     # never global tokens (the bare-67=VAL / ea-67=SQLDISCONNECT
                     # collision class; HARVEST.md round-17). The TO selector byte is
@@ -607,6 +668,12 @@ PUSH_KEY_LEAD = 0x8A # 8a 17 = PUSH KEY — ORACLE-measured (CMD_SWEEP.md row PU
                      # _reports.vcx::_outputdialog sec24 (ON-KEY save branch).
 POP_KEY_LEAD = 0x8B  # 8b 17 = POP KEY — same oracle row pair (snippet 'POP KEY'),
                      # corpus-aligned at the ELSE branch of the same method.
+# r42-zapin: PUSH/POP MENU _MSYSMENU = 8a/8b 1c ec 02; _MFILE = 8a 1c ec 23.
+# Byte 1c is the MENU keyword under lead 8a/8b (same value as ON_SELECTION_MENU).
+PUSH_POP_MENU_IDS = {
+    0x02: "_MSYSMENU",
+    0x23: "_MFILE",
+}
 PACK_LEAD = 0x33     # bare PACK — ORACLE-measured (CMD_SWEEP.md row PACK, snippet
                      # 'PACK'); corpus-aligned at systeminfo.scx::frmSysinfo.
 COPY_LEAD = 0x11     # 11 [12 <from-str>] 28 <to-str>: COPY [FILE <from>] TO <to>.
@@ -617,14 +684,14 @@ COPY_LEAD = 0x11     # 11 [12 <from-str>] 28 <to-str>: COPY [FILE <from>] TO <to
                      # exactly once in the scored universe — samples of one.
 COPY_FILE_MARK = 0x12  # FILE-from clause under lead 11 only (doubles as the GE
                        # comparison in expression space — contextual, not global)
-FOR_EACH_LEAD = 0xB5 # b5 <loopvar> 16 <collection> [c2] f9 05 <u16> = FOR EACH
-                     # <var> IN <collection> [FOXOBJECT]. Corpus-forced from the
-                     # scored pairs themselves (no oracle round yet): tail u16 ==
-                     # matching ENDEACH prefix - code_base at ALL occurrences
-                     # (fxlistener sec2 x2: m.-prefixed loop var + FOXOBJECT;
-                     # _reports::_outputdialog sec28: bare f7 loop var, no c2).
-                     # Loop-var forms measured: f5 0d f7 <sym> and bare f7 <sym>;
-                     # collection measured as an f4-run path with terminal f7.
+FOR_EACH_LEAD = 0xB5 # b5 <loopvar> 16 <collection> [c2] (f9 05 <u16> |
+                     # e9 00 <u32>) = FOR EACH <var> IN <collection>
+                     # [FOXOBJECT]. Corpus-forced from the scored pairs
+                     # (fxlistener sec2 x2 + _outputdialog sec28) plus the
+                     # u32-framed listener.vcx long-jump spelling (round-42 I5).
+                     # Tail word == matching ENDEACH prefix - code_base at ALL
+                     # occurrences. Loop-var forms: f5 0d f7 <sym> and bare
+                     # f7 <sym>; collection is an f4-run path with terminal f7.
 ENDEACH_LEAD = 0xB6  # bare ENDEACH sentinel pairing 0xb5; stored sources spell the
                      # loop end both NEXT (fxlistener:63) and ENDFOR
                      # (_outputdialog:310) — identical bytecode.
@@ -634,6 +701,23 @@ FOREACH_FOXOBJECT_MARK = 0xC2  # FOXOBJECT clause under lead b5 only
 SQL_SELECT_LEAD = 0x6F
 SQLSEL_ORDER_MARK = (0xC7, 0xC3)
 SQLSEL_DESC_MARK = 0x3C
+SQLSEL_TOP_MARK = 0x29  # SELECT TOP n: 29 fc <n> [fd] before INTO (r42-seltop).
+                        # Collides with GO TOP 0x29; SQL-local.
+SQLSEL_GROUP_MARK = 0xBF  # SELECT GROUP BY: bf fc <n> fd [07 fc <n> fd]*
+                          # after WHERE, before ORDER BY (r42-selgroup).
+                          # Collides with WINDOW()/FLOAT elsewhere; SQL-local.
+SQLSEL_AGG_STAR = 0x04    # COUNT(*) operand inside a 43-group (r42-tiera3).
+                          # Collides with MUL 0x04; SQL-aggregate-local.
+SQLSEL_AGG_DISTINCT = 0xFF  # COUNT(DISTINCT x): ea ff before the operand.
+SQLSEL_AGG = {            # ea <id> closer of a SQL aggregate 43-group
+    0xFA: "SUM", 0xFB: "AVG", 0xFC: "COUNT", 0xFD: "MIN", 0xFE: "MAX",
+}
+SQLSEL_JOIN_MARK = 0xD2   # JOIN table follows this byte (r42-tiera3).
+SQLSEL_JOIN_INNER = 0xD4  # INNER JOIN and bare JOIN are this byte; LEFT 58, RIGHT 59.
+SQLSEL_JOIN_LEFT = 0x58
+SQLSEL_JOIN_RIGHT = 0x59
+SQLSEL_JOIN_ON = 0x20     # ON <expr> after the joined table/alias.
+SQLSEL_FROM_ALIAS = 0x51  # FROM t alias uses the same 51 f7 <u16> as column AS.
 SQLSEL_INTOCURSOR_MARK = (0xBC, 0xBD)
 SQLSEL_NOFILTER_MARK = 0xCD  # trailing NOFILTER tag, the slot READWRITE (d7) also
                              # occupies; VFP spells them as alternatives on one
@@ -645,8 +729,10 @@ SQL_UNION_SUBLEAD = 0xC4  # second byte of the UNION-form SQL SELECT (6f c4 ...)
                           # UNION ALL of two arms emitted in reverse order
 SQL_UNION_CONST = (0x03, 0xE8)  # fixed u16 pair following the c4 sublead in all
                           # 5 measured instances; meaning unmeasured — opaque
-SQL_DISTINCT_MARK = 0xBE  # per-arm DISTINCT marker under lead 6f (HARVEST.md:
-                          # 'be=DISTINCT'); also the measured no-cursor prefix
+SQL_DISTINCT_MARK = 0xBE  # SELECT DISTINCT: 6f be 15 … [bc bd INTO]
+                          # (r42-seldistinct). Per-arm DISTINCT under UNION
+                          # (6f c4) is the same mark. No-INTO DISTINCT is
+                          # 6f be 15 … with no bc bd.
 REPLACE_LEAD = 0x3E # 3e <lvalue> d1 fc <expr> fd [07 <lvalue> d1 fc <expr> fd]* =
                     # REPLACE f WITH e [,f2 WITH e2...] — forced by aligned sources
                     # (supplycapacity/scx::Text1 'REPLACE DAYQUAN WITH QUAN*RAND*WEEKQUAN'
@@ -767,6 +853,11 @@ MEASURED_LOCAL_GROUP_CLOSERS = {
                     # raw-equal to _reports.vcx::_output #10 modulo symbol index)
                     # and 'qq = WONTOP("w1")' -> 54f7000010fc43d902007731be (f28).
                     # Name read from the generated registry at point of use.
+    0xC0: (0, 1),   # WVISIBLE — r43-class: 'x = WVISIBLE()' -> 43 c0;
+                    # 'x = WVISIBLE('trace')' -> 43 fb… c0. Two args unmeasured.
+    0x85: (0, 1),   # PROMPT — r43-prompt: 'x = PROMPT()' -> 43 85;
+                    # 'x = PROMPT(1)' -> 43 f8 1 85. Statement lead 0x85 is
+                    # ENDFOR; expression closer is PROMPT. Two args unmeasured.
     0x9F: (1, 1),   # r36-sim V-CLOSER-9F: RELATION — oracle id
                     # function_ids.json relation=bare 9f (arity "?"); corpus
                     # argument histogram {1:2} over decoder-reached closer
@@ -776,6 +867,25 @@ MEASURED_LOCAL_GROUP_CLOSERS = {
 }
 if not set(MEASURED_LOCAL_GROUP_CLOSERS) <= BUILTIN_BARE.keys():
     raise AssertionError("local-arity bare closer missing from measured registry")
+
+# Round-42 I4: MESSAGEBOX (ea 0x78) argument count is on the wire.
+# Oracle r42-msgbox (probes/oracle_harvest/round42_msgbox_{streams,findings}.json,
+# vmlock label "r42-msgbox"):
+#   MESSAGEBOX("a")            -> 1 operand before ea78
+#   MESSAGEBOX("a", 0)         -> 2
+#   MESSAGEBOX("a", 0, "t")    -> 3
+#   MESSAGEBOX("a", 0, "t", 5) -> 4  (timeout)
+# Discriminator: MESSAGEBOX("a", 0+48+0) is TWO operands (the sum folds to
+# f8 04 30, no ADD on the wire) and is NOT MESSAGEBOX("a", 0, "t"). Do not
+# invent a type+title concatenation and do not drop an operand the wire has.
+# 0+47+1 / 0+48+0 / 0048 as the 3-arg TYPE compile to one integer (f8 04 30);
+# emitting the sum would be fabrication. 48 (f8 02 30) is a different spelling.
+# id -> (min args, max args). Name stays a generated-registry property.
+MEASURED_EA_GROUP_CLOSERS = {
+    0x78: (1, 4),
+}
+if not set(MEASURED_EA_GROUP_CLOSERS) <= BUILTIN_ESCAPES.keys():
+    raise AssertionError("ea-arity closer missing from measured registry")
 
 # ---- bare system-variable reads (SYSVAR_READ <u8 id>) ---------------------------------------
 # Family shape ORACLE-measured: round 21 emitted '_cliptext' as the two raw bytes
@@ -844,6 +954,9 @@ SYSTEM_VARS = {
     #   the streams file but stays UNBOUND — no carrier needs it here.
     0x3E: "_ASCIICOLS",
     0x3F: "_ASCIIROWS",
+    # round-42 E1: oracle `qq = _COVERAGE` -> ed 42; AATest b3a24153c66ca99a
+    # sections 0/1/2 carry the same id (probes/oracle_harvest/round42_where03_*).
+    0x42: "_COVERAGE",
 }
 WORKAREA_REF = 0xF5 # f5 <id>: 0D = memory-variable reference (m.<name>, next token MUST
                      # be f7 <sym>; forced 235/235 against stored sources); 01-0A = the
@@ -920,6 +1033,10 @@ DECODER_ENABLED_EA = frozenset(
     b for b, n in _reg.EA_IDS.items()
     if isinstance(n, str) and parse_arity(_reg.ARITY.get(("ea", b)))
 )
+if set(MEASURED_EA_GROUP_CLOSERS) & DECODER_ENABLED_EA:
+    raise AssertionError(
+        "ea id carries BOTH a registry arity and a local corpus gate: "
+        "reconcile MEASURED_EA_GROUP_CLOSERS")
 DECODER_ENABLED_X1A = frozenset(
     b for b, n in _reg.X1A_IDS.items()
     if isinstance(n, str)
@@ -984,9 +1101,11 @@ MOVE_POPUP_LEAD = 0x7A        # 7a c6 f7<sym> 28 fc<row>fd 07 fc<col> (e06; …:
 # round 41 contradicts a round-37 row; the table only grew.
 MENU_BAR_ID_MARK = 0xEC
 MENU_BAR_IDS = {
+    0x10: "_MST_HPSCH",
     0x24: "_MFI_NEW",
     0x25: "_MFI_OPEN",
     0x26: "_MFI_CLOSE",
+    0x27: "_MFI_CLALL",
     0x28: "_MFI_SP100",
     0x29: "_MFI_SAVE",
     0x2C: "_MFI_SP200",
@@ -994,6 +1113,8 @@ MENU_BAR_IDS = {
     0x2F: "_MFI_SYSPRINT",
     0x31: "_MFI_SP300",
     0x32: "_MFI_QUIT",
+    0x33: "_MFI_PREVU",
+    0x34: "_MFI_PGSET",
     0x3A: "_MED_UNDO",
     0x3B: "_MED_REDO",
     0x3C: "_MED_SP100",
@@ -1015,11 +1136,15 @@ MENU_BAR_IDS = {
     0x4D: "_MED_REPL",
     0x4F: "_MED_SP500",
     0x51: "_MED_PREF",
+    0x7E: "_MWI_ARRAN",
     0x7F: "_MWI_HIDE",
     0x84: "_MWI_MOVE",
     0x85: "_MWI_SIZE",
     0x86: "_MWI_ZOOM",
     0x87: "_MWI_MIN",
+    0xCF: "_MWZ_UPSIZING",
+    0xEA: "_MWZ_WEBPUBLISHING",
+    0xEB: "_MWZ_WEBSERVICES",
 }
 # One corpus artifact (mhxpcontrol.vcx::edit) was built by an older VFP whose Edit-block
 # ids sit exactly one BELOW the current table: its stored source names six bars whose

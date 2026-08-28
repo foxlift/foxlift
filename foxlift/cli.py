@@ -83,11 +83,12 @@ def cmd_inspect(args):
         result["record_count"] = t.record_count
         result["code_page_mark"] = hex(cpm)
         recs = []
+        codec = foxdbf.CODE_PAGE_MARKS.get(cpm)
         for name, src, code in foxdbf.objcode_records(path):
             r = {"name": name, "objcode_size": len(code) if code else 0}
             if code and len(code) >= 8:
                 try:
-                    m = container.parse(code)
+                    m = container.parse(code, codec=codec)
                     r["statements"] = len(m.statements)
                     r["known"] = sum(1 for s in m.statements if s.known)
                     r["verbatim"] = sum(1 for s in m.statements if s.text is not None)
@@ -115,10 +116,11 @@ def cmd_inspect(args):
 
 # --- decompile ------------------------------------------------------------------------
 
-def _lift_module(m, mod_dir, meta) -> bool:
+def _lift_module(m, mod_dir, meta) -> tuple[bool, list[str]]:
     """Write one parsed module's source tree into mod_dir. True iff every section lifted."""
     mod_dir.mkdir(parents=True, exist_ok=True)
     ok = True
+    reasons: list[str] = []
 
     meta = dict(meta)
     meta["statement_count"] = len(m.statements)
@@ -138,6 +140,7 @@ def _lift_module(m, mod_dir, meta) -> bool:
         except lifter.Unsupported as e:
             smeta["lifted"] = False
             smeta["reason"] = str(e)
+            reasons.append(str(e).split("\n", 1)[0])
             ok = False
             label = "section %d (%d statement(s) beyond the supported slice: %s)" % (
                 si, len(sec.statements), e)
@@ -163,6 +166,12 @@ def _lift_module(m, mod_dir, meta) -> bool:
             src_lines.extend(lines)
         sections_meta.append(smeta)
 
+    if ok:
+        try:
+            src_lines = lifter.lift_program(m)
+        except lifter.Unsupported:
+            pass
+
     meta["lifted_sections"] = sum(1 for s in sections_meta if s.get("lifted"))
     meta["sections"] = sections_meta
 
@@ -175,7 +184,7 @@ def _lift_module(m, mod_dir, meta) -> bool:
     # stored GBK bytes reach disk unchanged regardless of any input code-page mark
     # (docs/VERBATIM.md Option A). Never a default-encoding write_text.
     (mod_dir / "source.prg").write_bytes(codepage.prg_bytes(src_lines))
-    return ok
+    return ok, reasons
 
 
 def _record_dirname(index: int, name: str) -> str:
@@ -193,18 +202,20 @@ def cmd_decompile(args):
     module_count = 0
     records_without_code = 0
     record_parse_failures = 0
+    reasons: list[str] = []
 
     if fmt == "table":
         # .scx/.vcx tables carry bytecode per record in the memo side-file: modules come
         # from OBJCODE records, never from magic-scanning the table bytes (which hold no
         # modules and would report a false "nothing here").
+        codec = foxdbf.table_codec(path)
         for ri, (name, _src, code) in enumerate(foxdbf.objcode_records(path)):
             if not code:
                 records_without_code += 1
                 continue
             mod_dir = outdir / _record_dirname(ri, name)
             try:
-                m = container.parse(code)
+                m = container.parse(code, codec=codec)
             except ValueError as e:
                 # A record whose OBJCODE does not parse is REPORTED, never dropped.
                 verified = False
@@ -214,13 +225,17 @@ def cmd_decompile(args):
                     {"record": name, "parse_error": str(e)}, indent=2))
                 continue
             module_count += 1
-            if not _lift_module(m, mod_dir, {"record": name}):
+            ok, why = _lift_module(m, mod_dir, {"record": name})
+            if not ok:
                 verified = False
+                reasons.extend(why)
     else:
         for off, m in _iter_modules(buf):
             module_count += 1
-            if not _lift_module(m, outdir / ("module_%06x" % off), {"offset": off}):
+            ok, why = _lift_module(m, outdir / ("module_%06x" % off), {"offset": off})
+            if not ok:
                 verified = False
+                reasons.extend(why)
 
     # Zero modules is a RED result, not a quiet success: an input with no parseable VFP
     # module must not ship as exit 0 + verified=True (the shipped "exit 0 on a red run"
@@ -232,6 +247,9 @@ def cmd_decompile(args):
         result["records_without_code"] = records_without_code
     if record_parse_failures:
         result["record_parse_failures"] = record_parse_failures
+    if reasons:
+        result["reasons"] = reasons
+        result["reason"] = reasons[0]
     if module_count == 0:
         result["reason"] = ("no record's OBJCODE parsed" if record_parse_failures
                             else "no VFP modules found in input")

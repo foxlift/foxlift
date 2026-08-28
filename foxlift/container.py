@@ -120,6 +120,7 @@ class Section:
     statements: list[Statement] = field(default_factory=list)
     symbols: list[str] = field(default_factory=list)   # table following this section, if parsed
     symbols_parsed: bool = False
+    codec: str | None = None   # table code-page for symbol names AND string payloads (I6/I11)
 
     @property
     def end(self) -> int:
@@ -148,6 +149,186 @@ class HitClassification:
     status: str          # "parsed" | "empty" | "rejected"
     reason: str
     module: "Module | None" = None
+
+
+@dataclass
+class ClassIdentity:
+    """DEFINE CLASS name / AS base / OLEPUBLIC from the post-section directory.
+
+    r43-fxphdr: these identities are not in the FORMAT.md §2 front header.
+    After the last section terminator and its 55-table (count may be 0):
+        <u16 nlen> <name> <u16 blen> <base> <u16 unk0> <u16 unk1> <u16 ole>
+    ``ole`` is 1 for OLEPUBLIC, 0 otherwise. Name and base keep stored case.
+    ``methods`` is the name list riding ahead of the class-init section
+    (``<u16 nlen> <name> <u32> <u32>``, last u32 overlaps the next marker).
+    Names may be ``object.event`` (ADD OBJECT methods). ``method_vis`` is
+    parallel: empty for public (0xa2), ``PROTECTED`` (0xa3), ``HIDDEN`` (0x9e).
+    The 0xa2/0xa3/0x9e INT32 is a 1-based index into that name list.
+    """
+    name: str
+    as_base: str
+    olepublic: bool
+    methods: list[str] = field(default_factory=list)
+    method_vis: list[str] = field(default_factory=list)
+
+
+def _u16le(buf: bytes, i: int) -> int:
+    return int.from_bytes(buf[i:i + 2], "little")
+
+
+# Class-init method-index leads (docs/FORMAT.md §2): public / PROTECTED / HIDDEN.
+_METHOD_INDEX_LEADS = (0xA2, 0xA3, 0x9E)
+
+
+def _ident_bytes(raw: bytes, *, dotted: bool = False) -> str | None:
+    """Stored identifier as a latin-1 carrier. ASCII letter/_ or a DBCS lead
+    may start a name; digits follow. ``dotted`` allows ``object.event``
+    (ADD OBJECT methods in the method directory)."""
+    if not raw:
+        return None
+    first = raw[0]
+    if not (65 <= first <= 90 or 97 <= first <= 122 or first == 95
+            or first >= 0x80):
+        return None
+    for b in raw[1:]:
+        if (65 <= b <= 90 or 97 <= b <= 122 or 48 <= b <= 57 or b == 95
+                or b >= 0x80):
+            continue
+        if dotted and b == 46:
+            continue
+        return None
+    return raw.decode("latin1")
+
+
+def _skip_symbol_table(buf: bytes, pos: int, end: int) -> int:
+    """Advance past a 55-table, including the count-0 form the section reader rejects."""
+    if pos + 3 > end or buf[pos] != 0x55:
+        return pos
+    count = _u16le(buf, pos + 1)
+    cur = pos + 3
+    for _ in range(count):
+        if cur + 2 > end:
+            return pos
+        nlen = _u16le(buf, cur)
+        cur += 2 + nlen
+        if cur > end:
+            return pos
+    return cur
+
+
+def _method_names(buf: bytes, start: int, stop: int) -> list[str]:
+    pos = _skip_symbol_table(buf, start, stop)
+    names: list[str] = []
+    while pos + 3 <= stop:
+        nlen = _u16le(buf, pos)
+        if not (1 <= nlen <= 128) or pos + 2 + nlen > stop:
+            break
+        ident = _ident_bytes(buf[pos + 2:pos + 2 + nlen], dotted=True)
+        if ident is None:
+            break
+        names.append(ident)
+        pos += 2 + nlen
+        pos = min(pos + 8, stop)
+    return names
+
+
+def class_identities(buf: bytes, off: int = 0,
+                     end: int | None = None) -> list[ClassIdentity]:
+    """Read DEFINE CLASS identities from the post-section directory. No VM."""
+    if end is None:
+        end = len(buf)
+    try:
+        mod = parse(buf, off)
+    except ValueError:
+        return []
+    if not mod.sections:
+        return []
+    pos = _skip_symbol_table(buf, mod.sections[-1].end + 2, end)
+    recs: list[ClassIdentity] = []
+    while pos + 6 <= end:
+        nlen = _u16le(buf, pos)
+        if not (1 <= nlen <= 128) or pos + 2 + nlen + 2 > end:
+            break
+        name = _ident_bytes(buf[pos + 2:pos + 2 + nlen])
+        if name is None:
+            break
+        j = pos + 2 + nlen
+        blen = _u16le(buf, j)
+        if not (1 <= blen <= 128) or j + 2 + blen + 6 > end:
+            break
+        base = _ident_bytes(buf[j + 2:j + 2 + blen])
+        if base is None:
+            break
+        k = j + 2 + blen
+        ole = _u16le(buf, k + 4)
+        recs.append(ClassIdentity(name=name, as_base=base, olepublic=ole == 1))
+        pos = k + 6
+    if not recs:
+        return []
+    # Method names sit in one directory immediately before the first
+    # class-init section. Each 0xa2/0xa3/0x9e INT32 is a 1-based index
+    # into that list (public / PROTECTED / HIDDEN). Names not referenced
+    # by any index are leftover module-level procedures, not class members.
+    nclass = len(recs)
+    secs = mod.sections
+    if len(secs) >= nclass + 1:
+        inits = secs[-nclass:]
+        prev = secs[-nclass - 1] if len(secs) > nclass else None
+        if prev is not None:
+            names = _method_names(buf, prev.end + 2, inits[0].offset)
+            for rec, sec in zip(recs, inits):
+                rec.methods = []
+                rec.method_vis = []
+                for st in sec.statements:
+                    if not st.stream or st.stream[0] not in _METHOD_INDEX_LEADS:
+                        continue
+                    if len(st.stream) < 7:
+                        continue
+                    idx = int.from_bytes(st.stream[3:7], "little")
+                    if 1 <= idx <= len(names):
+                        rec.methods.append(names[idx - 1])
+                    else:
+                        rec.methods.append("_m%d" % idx)
+                    rec.method_vis.append(
+                        {0xA3: "PROTECTED", 0x9E: "HIDDEN"}.get(
+                            st.stream[0], ""))
+    return recs
+
+
+def procedure_names(buf: bytes, off: int = 0,
+                    end: int | None = None) -> list[str]:
+    """Procedure names after the last 55-table of a non-class module.
+
+    r43 G3: generated menus compile an unnamed main section plus
+    ``<u16 nlen> <name> <u32> <u16 0> <u16 0xffff>`` records. Class
+    files use :func:`class_identities` instead (their next record is
+    AS-base, not a 0xffff trailer).
+    """
+    if end is None:
+        end = len(buf)
+    if class_identities(buf, off, end):
+        return []
+    try:
+        mod = parse(buf, off)
+    except ValueError:
+        return []
+    if not mod.sections:
+        return []
+    pos = _skip_symbol_table(buf, mod.sections[-1].end + 2, end)
+    names: list[str] = []
+    while pos + 10 <= end:
+        nlen = _u16le(buf, pos)
+        if not (1 <= nlen <= 128) or pos + 2 + nlen + 8 > end:
+            break
+        ident = _ident_bytes(buf[pos + 2:pos + 2 + nlen])
+        if ident is None:
+            break
+        trailer = buf[pos + 2 + nlen:pos + 2 + nlen + 8]
+        if trailer[6:8] != b"\xff\xff":
+            break
+        names.append(ident)
+        pos += 2 + nlen + 8
+    return names
 
 
 @dataclass
@@ -419,7 +600,8 @@ def sections(buf: bytes, off: int = 0, end: int | None = None,
     return found
 
 
-def parse_symbol_table(buf: bytes, pos: int, end: int) -> tuple[list[str], bool]:
+def parse_symbol_table(buf: bytes, pos: int, end: int,
+                       codec: str | None = None) -> tuple[list[str], bool]:
     """Try to read the symbol table documented in FORMAT.md §7 at pos:
 
         55 <u16 count> then count entries of <u16 len> <name bytes>
@@ -429,6 +611,10 @@ def parse_symbol_table(buf: bytes, pos: int, end: int) -> tuple[list[str], bool]
     the caller treats symbols as unparsed rather than guessing. Confirmed against lans.scx;
     whether a table ALWAYS follows the last section is UNVERIFIED, so failure here is
     reported, never fatal.
+
+    ``codec`` is the table code-page (``dbf.CODE_PAGE_MARKS.get(mark)``). None, an unmapped
+    mark, or a codec that cannot decode a slot stays latin-1 — byte-preserving, the
+    standalone .fxp default. Callers that have the table mark pass it; compare.py does not.
     """
     if pos + 3 > end or buf[pos] != 0x55:
         return [], False
@@ -442,20 +628,26 @@ def parse_symbol_table(buf: bytes, pos: int, end: int) -> tuple[list[str], bool]
         (nlen,) = struct.unpack_from("<H", buf, cur)
         if not (1 <= nlen <= 4096) or cur + 2 + nlen > end:
             return [], False
-        names.append(buf[cur + 2:cur + 2 + nlen].decode("latin1"))
+        raw = buf[cur + 2:cur + 2 + nlen]
+        try:
+            names.append(raw.decode(codec or "latin1"))
+        except (UnicodeDecodeError, LookupError):
+            names.append(raw.decode("latin1"))
         cur += 2 + nlen
     return names, True
 
 
 def parse(buf: bytes, off: int = 0,
-          reject_trace: list | None = None) -> Module:
+          reject_trace: list | None = None,
+          codec: str | None = None) -> Module:
     """Parse one module beginning at off. Raises ValueError if no accepted magic is there.
 
     The search span stops at the next accepted magic occurrence, so an embedded module's
     symbol table and strings can never bleed into the following one. A module may hold several
     code sections — a main body plus one per procedure — kept nested under Module.sections in
     file order. ``reject_trace`` is the opt-in candidate-rejection ledger documented on
-    :func:`sections`.
+    :func:`sections`. ``codec`` is forwarded to :func:`parse_symbol_table`; omit it for
+    standalone .fxp (latin-1).
     """
     magic = buf[off:off + 4]
     if magic not in ACCEPTED_MAGICS:
@@ -471,9 +663,10 @@ def parse(buf: bytes, off: int = 0,
     # a section followed directly by another section simply has none.
     for sec in secs:
         tail = sec.end + 2
-        names, ok = parse_symbol_table(buf, tail, nxt)
+        names, ok = parse_symbol_table(buf, tail, nxt, codec=codec)
         if ok:
             sec.symbols, sec.symbols_parsed = names, True
             mod.symbols.extend(names)
             mod.symbols_parsed = True
+        sec.codec = codec
     return mod

@@ -44,7 +44,7 @@ from pathlib import Path
 
 from foxlift import container, dbf, gold_mismatch, lifter, report, schemas
 
-DEFAULT_CORPUS = Path.home() / "work" / "foxlift-corpus"
+DEFAULT_CORPUS = Path.home() / "work" / "foxlift-root" / "foxlift-corpus"
 DEFAULT_BENCH = Path("build/benchmark.json")
 
 # --- language coverage vs the ALANGUAGE() denominator ---------------------------------------
@@ -191,6 +191,7 @@ def collect_rows(bench: dict, corpus_root: Path,
         [p["pair_id"] for p in pairs])
     rows = []
     records_by_path: dict[Path, dict[str, bytes]] = {}
+    codec_by_path: dict[Path, str | None] = {}
     for pid in ids:
         p = by_id.get(pid)
         if p is None:                      # cannot happen for ids drawn from this bench
@@ -206,9 +207,14 @@ def collect_rows(bench: dict, corpus_root: Path,
                 for name, _src, record_code in dbf.objcode_records(artifact_path):
                     records.setdefault(name, record_code)
                 records_by_path[artifact_path] = records
+                try:
+                    codec_by_path[artifact_path] = dbf.table_codec(artifact_path)
+                except Exception:  # noqa: BLE001 — missing/unreadable table: latin-1
+                    codec_by_path[artifact_path] = None
             code = records_by_path[artifact_path].get(objname)
         except Exception:                  # noqa: BLE001 — unreadable input stays a row
             records_by_path[artifact_path] = {}
+            codec_by_path[artifact_path] = None
             code = None
         meta = {
             "pair_id": pid,
@@ -223,7 +229,9 @@ def collect_rows(bench: dict, corpus_root: Path,
                          "m": {"fail": "record not found"}})
             continue
         try:
-            mod = container.parse(code)
+            codec = codec_by_path.get(artifact_path)
+            mod = (container.parse(code, codec=codec) if codec
+                   else container.parse(code))
         except ValueError as e:
             rows.append({**meta, "unit": "record_failure",
                          "m": {"fail": f"unparsed: {e}"}})
@@ -644,7 +652,7 @@ def main(argv=None) -> int:
     ap.add_argument("--benchmark-json", type=Path, default=DEFAULT_BENCH,
                     help="freeze_benchmark.py output (default: build/benchmark.json)")
     ap.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS,
-                    help="local corpus root (default: ~/work/foxlift-corpus)")
+                    help="local corpus root (default: ~/work/foxlift-root/foxlift-corpus)")
     ap.add_argument("--frozen-run", type=Path,
                     default=report._default_fixtures() / "phase2_run.json",
                     help="frozen phase-2 run for the reconciliation section")

@@ -113,6 +113,16 @@ class Table:
             yield row
 
 
+def table_codec(path: Path) -> str | None:
+    """Code-page codec for a DBF-family table, or None when the mark is unmapped.
+
+    Round-42 I6: symbol-table name bytes follow this mark (0x7a→GBK, 0x03→cp1252).
+    Unmapped marks stay None so container.parse keeps latin-1 (byte-preserving).
+    """
+    t = Table(path)
+    return CODE_PAGE_MARKS.get(t.code_page_mark)
+
+
 def objcode_records(path: Path):
     """Yield (objname, source_text, bytecode) for every method-bearing record.
 

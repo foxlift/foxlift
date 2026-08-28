@@ -3,6 +3,27 @@
 FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the version in
 `pyproject.toml`.
 
+## 0.2.0 — 2026-08-28
+
+Compiled-program support and a measured round-trip baseline.
+
+- Decompile standalone compiled programs: `DEFINE CLASS` scaffolds in `.fxp`
+  (properties, `PROTECTED`/`HIDDEN`, `ADD OBJECT … WITH`), with class name,
+  base class, and `OLEPUBLIC` recovered from the container directory.
+- Decompile compiled menu programs (`.mpx`): `DEFINE PAD`/`DEFINE BAR`/popup
+  clauses, `ON PAD`/`ON SELECTION`, `SET SYSMENU` forms.
+- SQL decode: `DISTINCT`, `TOP n`, `GROUP BY`, `INNER`/`LEFT`/`RIGHT JOIN`,
+  and aggregate columns (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`).
+- Non-Latin code pages: symbol names, string literals, and verbatim payloads
+  decode via the table's code-page mark instead of Latin-1 mojibake.
+- Emission fidelity: a large catalog of spellings the VFP9 compiler proves
+  canonical (operator and keyword aliases, `#DEFINE`d literals, clause
+  orders) is documented as unrecoverable and emitted in canonical form.
+- Round-trip: recompiling decompiled output on real VFP9 reproduces the
+  original bytecode frames for 95% of the measured population; procedure
+  names are preserved on emit, and the one statement lead no probe could
+  produce is annotated in place rather than guessed.
+
 ## 0.1.0 — 2026-08-27
 
 First public release.

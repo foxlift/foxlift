@@ -131,16 +131,26 @@ class TestDecompile:
         src = (outdir / 'module_000000' / 'source.prg').read_text()
         assert "? 'two'" in src and 'STORE 3 TO A, B' in src, src
 
-    def test_multisection_partial_report(self, tmp_path):
-        """g04: lifted sections kept, empty ones marked, unsupported one fails verification."""
+    def test_multisection_class_init_now_lifts(self, tmp_path):
+        """g04: 0xa2 class-init was the unsupported section (exit 2). r43 lifts it.
+
+        Four sections: `? MAIN`, empty method, class-init 0xa2 (no source line),
+        empty trailer. Empty methods still marked. Statement-level honesty for
+        remaining unsupported leads is the 0xa1/0x96 ranking families.
+        """
         outdir = tmp_path / 'multi'
         r = _run('decompile', str(FIXTURES / 'g04_empty_method.fxp'), '-o', str(outdir))
-        assert r.returncode == 2
+        assert r.returncode == 0, r.stdout[:200]
+        d = json.loads(r.stdout)
+        assert d['verified'] is True
         meta = json.loads((outdir / 'module_000000' / 'meta.json').read_text())
         assert len(meta['sections']) == 4, meta
-        assert [s['lifted'] for s in meta['sections']] == [True, True, False, True]
+        assert [s['lifted'] for s in meta['sections']] == [True, True, True, True]
         src = (outdir / 'module_000000' / 'source.prg').read_text()
-        assert '(empty)' in src and '? MAIN' in src, src
+        # 0xa2 class-init has no source line (r43-class); empty sections omit
+        # the old '* --- section N (empty) ---' markers once lift_program
+        # reconstructs the module.
+        assert '? MAIN' in src, src
 
     def test_zero_modules_exits_2(self, tmp_path):
         """An input with no parseable VFP module is a red run: exit 2 with a stated reason,

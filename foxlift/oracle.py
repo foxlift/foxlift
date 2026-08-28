@@ -62,7 +62,8 @@ class CompileResult:
         return self.fxp is not None and not self.err
 
 
-def driver_script(bench: str, in_zip: str, out_zip: str, driver: str) -> str:
+def driver_script(bench: str, in_zip: str, out_zip: str, driver: str,
+                  compile_as: int | None = None) -> str:
     """Build the PowerShell guest script for one compile batch.
 
     Extracted from compile_dir so its load-bearing string-construction properties are
@@ -75,6 +76,7 @@ def driver_script(bench: str, in_zip: str, out_zip: str, driver: str) -> str:
     - 'QUIT' is appended as its own array element — a separate driver line — never glued
       onto the last COMPILE argument.
     """
+    as_clause = (" + ' AS %d'" % compile_as) if compile_as else ""
     return rf"""
 $ErrorActionPreference='Stop'
 New-Item -ItemType Directory -Force -Path '{bench}' | Out-Null
@@ -82,7 +84,7 @@ Expand-Archive -Path {in_zip} -DestinationPath '{bench}' -Force
 # @() forces an array even for a single file: otherwise $cmds is a scalar and
 # ($cmds + 'QUIT') string-concatenates into "COMPILE x.prgQUIT", which hangs VFP on a
 # missing filename. Batches of two or more files masked this since the harness was written.
-$cmds = @(Get-ChildItem '{bench}\*.prg' | ForEach-Object {{ 'COMPILE ' + $_.FullName }})
+$cmds = @(Get-ChildItem '{bench}\*.prg' | ForEach-Object {{ 'COMPILE ' + $_.FullName{as_clause} }})
 Set-Content {driver}.prg -Value ($cmds + 'QUIT') -Encoding ascii
 Start-Process '{VFP}' -ArgumentList '-cC:\oracle\config.fpw','-t','{driver}.prg' -Wait | Out-Null
 Compress-Archive -Path '{bench}\*' -DestinationPath {out_zip}
@@ -90,7 +92,7 @@ Remove-Item -Recurse -Force '{bench}' -EA SilentlyContinue
 """
 
 
-def compile_dir(src_dir: Path) -> dict[str, CompileResult]:
+def compile_dir(src_dir: Path, compile_as: int | None = None) -> dict[str, CompileResult]:
     """Compile every .prg in src_dir on the oracle. One VFP invocation for the whole batch.
 
     Transfers both ways as a single zip — per-file scp costs a round trip each and dominates
@@ -119,7 +121,8 @@ def compile_dir(src_dir: Path) -> dict[str, CompileResult]:
         shutil.make_archive(str(up.with_suffix("")), "zip", src_dir)
         _scp(str(up), f"{VM}:{in_zip}")
 
-        powershell(driver_script(bench, in_zip, out_zip, driver))
+        powershell(driver_script(bench, in_zip, out_zip, driver,
+                                 compile_as=compile_as))
 
         down = td / "out.zip"
         _scp(f"{VM}:{out_zip}", str(down))

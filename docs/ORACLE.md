@@ -92,6 +92,16 @@ destroys minimal-pair diffs. `corpus.py` names everything `s%04d.prg` for this r
 **Quoting through ssh → cmd → PowerShell.** Base64-UTF16LE the script and use
 `powershell -EncodedCommand`. `oracle.powershell()` does this.
 
+**GBK unquoted identifiers need the guest ACP to be 936.** `SET CODEPAGE TO 936`,
+`SET CPCOMPILE TO 936`, and `COMPILE AS 936` do not parse DBCS identifiers while
+the OS ANSI code page is 1252 (measured 2026-08-23, probes/codepage/; still true
+as VFP-level knobs). On 2026-08-28 the guest system locale was set
+`Set-WinSystemLocale zh-CN` (ACP/OEMCP registry 936, reboot). After that,
+unquoted GBK identifiers compile. `Language.Basic~~~zh-CN` is installed;
+`Install-Language zh-CN` as a full pack was only partial and is not required
+for ACP. Do not flip ACP back to 1252 to “fix” an English compile — GBK is
+ASCII-compatible below 0x80.
+
 **Headless runs need `SCREEN=OFF`** in `C:\oracle\config.fpw`, invoked as
 `vfp9.exe -cC:\oracle\config.fpw -t prog.prg`.
 

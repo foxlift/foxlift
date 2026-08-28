@@ -40,7 +40,7 @@ ABOUTME: and confirmed here before inclusion. ReFox never consulted.
 | 55 | symbol-table lead | `55 u16count entries…` (NOT end-of-procedure) |
 | 5e | SCATTER MEMVAR BLANK | `5e 08 c2` |
 | 5f | GATHER MEMVAR | `5f c2` |
-| 6f | SELECT-SQL (simple) | `6f 15 <FROM> [c7] [<cols fc..fd 07-joined>] [c6 fc WHERE fd] [c3 fc ORDER fd] bc bd fb<cursor>` |
+| 6f | SELECT-SQL (simple) | `6f [be DISTINCT] 15 <FROM> [c7] [<cols fc..fd 07-joined>] [c6 fc WHERE fd] [c3 fc ORDER fd] [29 fc TOP n fd] [bc bd fb<cursor>]` |
 | 70 | UPDATE-SQL | `70 fb <tbl> ca <col> 10 fc v fd c6 fc cond fd` |
 | 72 | INSERT-SQL | `72 bc fb <tbl> 02 <cols> 03 c5 02 fc vals fd 03` — statement LEAD; no certified expression-position identity (round-27: authored ADD is 06, the six PATHS suspects are chained-call grammar, and the wider census leaves one >16KB unclassifiable stream once e2/payload operands are accounted) |
 | 73 | DEFINE family | keyword byte selects: WINDOW=`73 2c f7 sym …`, POPUP=`73 c6 f7 sym` |
@@ -65,7 +65,7 @@ ABOUTME: and confirmed here before inclusion. ReFox never consulted.
 One ALANGUAGE name each, all oracle-emitted by probes/oracle_harvest/cmd_sweep.py:
 43 RUN/! · 79 `???` · 05 ACCEPT · 74 ACTIVATE(26=SCREEN) · 07 ASSIST ·
 08 AVERAGE · 9b BEGIN / 9d END TRANSACTION · 93 BLANK · 09 BROWSE · 8f BUILD PROJECT ·
-7d CALCULATE · 0a CALL · 0b CANCEL · 0d CHANGE · 0e CLEAR · 0f CLOSE TABLES ·
+7d CALCULATE · 0a CALL · 0b CANCEL · 0d CHANGE · 0e CLEAR / WINDOW(2c) · 0f CLOSE TABLES ·
 83 COMPILE · 10 CONTINUE · 11 COPY FILE · 13 CREATE · 75 DEACTIVATE WINDOW ·
 b3 DEBUG · aa DEBUGOUT · 7c DECLARE DLL · 14 DELETE(+12 FILE) · 15 DIMENSION ·
 16 DIR/DIRECTORY · 17 DISPLAY · bf DOCK WINDOW · b7 DOEVENTS · 6a DROP TABLE ·
@@ -75,13 +75,13 @@ b3 DEBUG · aa DEBUGOUT · 7c DECLARE DLL · 14 DELETE(+12 FILE) · 15 DIMENSION
 27 INPUT · 69 ALTER TABLE · 29 JOIN WITH(d1) · 5c KEYBOARD(d3,3b) · 2a LABEL FORM(14) ·
 2b LIST · 2c LOAD · 59 LOGOUT · b1 MD/MKDIR · 5d MENU BAR · 2f MODIFY COMMAND(bc,3a) ·
 ad MOUSE CLICK(c3,05) · 7a MOVE WINDOW TO · ac NODEFAULT · 31 ON ERROR(10 selector) ·
-95 OPEN DATABASE(c2) · 33 PACK · 81 PLAY MACRO(1a) · 8a/8b PUSH/POP KEY(17) ·
+95 OPEN DATABASE(c2) · 33 PACK · 81 PLAY MACRO(1a) · 8a/8b PUSH/POP KEY(17) / MENU(1c ec id) ·
 39 READ · 3a RECALL · 35 REGIONAL (=PRIVATE shape) · 3b REINDEX · 3c RELEASE ·
 97 REMOVE TABLE(31) · 3d RENAME x TO y · 3f REPORT FORM(14) · 94 RESET ·
 40 RESTORE FROM(15) · 41 RESUME · 58 RETRY · b2 RD/RMDIR · 9c ROLLBACK ·
 44 SAVE TO(28) · 7e/7f SCAN/ENDSCAN · 60 SCROLL · 45 SEEK · 80 SHOW WINDOW ·
 89 SIZE WINDOW TO · 49 SORT ON(20)..TO · 4c SUSPEND · 4d TEXT body block (+1f) ·
-4e TOTAL ON..TO · 4f TYPE · 5a UNLOCK · 53 ZAP · 8c ZOOM WINDOW
+4e TOTAL ON..TO · 4f TYPE · 5a UNLOCK · 53 ZAP / ZAP IN(16 f7) · 8c ZOOM WINDOW
 
 Measured-empty (no bytecode exists): `*`, NOTE, #INCLUDE/#IFDEF/#IF/#ELIF/#IFNDEF.
 Compiler-rejected in every form tried: FREE LIBRARY, UNDEFINE, VALIDATE.
@@ -175,10 +175,13 @@ vs WAIT lead; bare 1e=BOF vs ENDIF lead. Position/state must select the table.
 TALK 32 · ESCAPE 15 · SAFETY 2e · EXACT 16 · DELETED 0f · CENTURY 05 ·
 CONSOLE 0a · NOTIFY 5a · OPTIMIZE 61 · FIXED 1b · HEADING 1e · NEAR 46 ·
 UNIQUE 36 · CARRY 03 · CONFIRM 09 · EXCLUSIVE 17 · MULTILOCKS 5f ·
-RESOURCE 54 · LOGERRORS 57 · TRBETWEEN 65 · HELP 1f · STATUS 30 ·
+RESOURCE 54 (+TO expr) · LOGERRORS 57 · TRBETWEEN 65 · HELP 1f · STATUS 30 ·
 POINT 3b · SEPARATOR 3c · ALTERNATE 01 · DEVICE 11 · FILTER 1a ·
 INDEX 21 · ORDER 28 · PATH 29 · DEFAULT 0e · PROCEDURE 2b ·
-**LIBRARY 62 (+ADDITIVE trailing 01)** · DATASESSION 80
+**LIBRARY 62 (+ADDITIVE trailing 01)** · DATASESSION 80 ·
+**SYSMENU 59** (TO `28`, AUTOMATIC `bc`, ON/OFF `20`/`1f`, SAVE `25`,
+NOSAVE `cd`, TO DEFAULT `28 0e`, TO `_MFILE` `28 fc ec 23`, TO `_MFILE, _MEDIT`
+`28 fc ec 23 fd 07 fc ec 39`; r43-sysmenu / r37 E09. Pad ids ≠ MENU_BAR_IDS.)
 
 Suffixes: 1f=OFF, 20=ON; value settings take 28(TO)+expression.
 
