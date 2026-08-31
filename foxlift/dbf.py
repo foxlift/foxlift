@@ -1,13 +1,14 @@
-# ABOUTME: Reader for the DBF+FPT pairs VFP uses to store forms, class libs, reports and menus.
-# ABOUTME: Exposes records as field dicts with memos resolved, which is where OBJCODE bytecode lives.
+# ABOUTME: Reader/writer for the DBF+FPT pairs VFP uses for forms, class libs, reports, menus, projects.
+# ABOUTME: Parse-to-records re-serializes byte-identical; reconstruction mutates only declared memos.
 
+import os
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # .scx/.vcx/.frx/.mnx are DBF tables; their memo side-files carry the same stem.
 MEMO_EXT = {".scx": ".sct", ".vcx": ".vct", ".frx": ".frt", ".mnx": ".mnt",
-            ".dbf": ".fpt", ".lbx": ".lbt"}
+            ".dbf": ".fpt", ".lbx": ".lbt", ".pjx": ".pjt"}
 
 # Code-page mark at byte 29 of the DBF header. Only the three marks every xBase tool agrees on
 # are mapped; anything else falls back to latin-1, which preserves bytes 1:1 but not semantics.
@@ -48,6 +49,58 @@ class Field:
     name: str
     type: str
     length: int
+    descriptor: bytes = field(default_factory=bytes)
+
+
+def corpus_root() -> Path:
+    return Path(os.environ.get(
+        "FOXLIFT_CORPUS", "~/work/foxlift-root/foxlift-corpus"
+    )).expanduser()
+
+
+def refuse_corpus_dest(path: Path) -> None:
+    """Writers never land under the corpus root (round-44 rule 12)."""
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(corpus_root().resolve())
+    except ValueError:
+        return
+    raise ValueError("refusing output under corpus root: %s" % resolved)
+
+
+def changed_ranges(before: bytes, after: bytes) -> list[tuple[int, int]]:
+    """Coalesced [start, end) ranges where before and after differ.
+
+    Length mismatch is one range covering the tail of the longer buffer.
+    """
+    n = min(len(before), len(after))
+    ranges: list[tuple[int, int]] = []
+    block = 4096
+    i = 0
+    while i < n:
+        if before[i] == after[i]:
+            # Skip equal stretches a block at a time: a reconstructed memo is
+            # megabytes of which a handful of records differ, and comparing
+            # byte by byte in Python made this function the whole harness's
+            # hot spot (65 s on one form). Slice equality is the same test,
+            # run in C; the bytewise walk below still finds the exact first
+            # differing byte inside the block that fails.
+            while i < n:
+                end = i + block if i + block < n else n
+                if before[i:end] != after[i:end]:
+                    break
+                i = end
+            while i < n and before[i] == after[i]:
+                i += 1
+            continue
+        j = i + 1
+        while j < n and before[j] != after[j]:
+            j += 1
+        ranges.append((i, j))
+        i = j
+    if len(before) != len(after):
+        ranges.append((n, max(len(before), len(after))))
+    return ranges
 
 
 class Table:
@@ -61,13 +114,27 @@ class Table:
         self.record_len = struct.unpack_from("<H", self.data, 10)[0]
         self.code_page_mark = self.data[29] if len(self.data) > 29 else 0
 
+        self.header = self.data[:self.header_len]
+        rec_start = self.header_len
+        rec_end = rec_start + self.record_count * self.record_len
+        self.record_bytes: list[bytes] = [
+            self.data[rec_start + i * self.record_len:
+                      rec_start + (i + 1) * self.record_len]
+            for i in range(self.record_count)
+        ]
+        self.trailer = self.data[rec_end:]
+        self.memo_bytes = self.memo[0] if self.memo else None
+        self.memo_block_size = self.memo[1] if self.memo else None
+
         self.fields: list[Field] = []
         off = 32
         while off < len(self.data) and self.data[off] != 0x0D:
+            slot = self.data[off:off + 32]
             self.fields.append(Field(
-                name=self.data[off:off + 11].split(b"\0")[0].decode("latin1"),
-                type=chr(self.data[off + 11]),
-                length=self.data[off + 16],
+                name=slot[:11].split(b"\0")[0].decode("latin1"),
+                type=chr(slot[11]) if len(slot) > 11 else "?",
+                length=slot[16] if len(slot) > 16 else 0,
+                descriptor=slot,
             ))
             off += 32
 
@@ -82,27 +149,37 @@ class Table:
                 return buf, block
         return None
 
-    def _memo(self, block: int) -> bytes:
+    def _memo_from(self, buf: bytes | None, size: int | None, block: int) -> bytes:
         # Block numbers are stored binary little-endian in VFP tables, not as ASCII digits.
-        if not block or not self.memo:
+        if not block or not buf or not size:
             return b""
-        buf, size = self.memo
         pos = block * size
         if pos + 8 > len(buf):
             return b""
         _typ, length = struct.unpack_from(">II", buf, pos)
         return buf[pos + 8: pos + 8 + length]
 
+    def _memo(self, block: int) -> bytes:
+        return self._memo_from(self.memo_bytes, self.memo_block_size, block)
+
+    def field_offset(self, name: str) -> tuple[int, int]:
+        """(offset, length) of a field inside a record, offset 0 = deleted flag."""
+        off = 1
+        for f in self.fields:
+            if f.name == name:
+                return off, f.length
+            off += f.length
+        raise KeyError(name)
+
     def records(self):
-        for r in range(self.record_count):
-            pos = self.header_len + r * self.record_len
-            if pos + self.record_len > len(self.data):
+        for rec in self.record_bytes:
+            if len(rec) < self.record_len:
                 return
-            deleted = self.data[pos:pos + 1] == b"*"
-            pos += 1
+            deleted = rec[:1] == b"*"
+            pos = 1
             row = {}
             for f in self.fields:
-                raw = self.data[pos:pos + f.length]
+                raw = rec[pos:pos + f.length]
                 pos += f.length
                 if f.type == "M":
                     row[f.name] = self._memo(struct.unpack_from("<I", raw)[0]
@@ -111,6 +188,177 @@ class Table:
                     row[f.name] = raw
             row["_deleted"] = deleted
             yield row
+
+    def serialize(self) -> tuple[bytes, bytes | None]:
+        """Table bytes and memo sidecar bytes (None when the source had no sidecar)."""
+        header = bytearray(self.header)
+        struct.pack_into("<I", header, 4, len(self.record_bytes))
+        body = bytes(header) + b"".join(self.record_bytes) + self.trailer
+        return body, self.memo_bytes
+
+    def _patch_record(self, rec_index: int, offset: int, blob: bytes) -> None:
+        rec = bytearray(self.record_bytes[rec_index])
+        rec[offset:offset + len(blob)] = blob
+        self.record_bytes[rec_index] = bytes(rec)
+
+    def _append_memo(self, payload: bytes, typ: int = 1) -> int:
+        """Allocate new blocks at next-free. Leaves existing memo bytes in place."""
+        bs = self.memo_block_size or 64
+        if self.memo_bytes is None:
+            hdr = bytearray(bs)
+            struct.pack_into(">I", hdr, 0, 1)
+            struct.pack_into(">H", hdr, 6, bs)
+            self.memo_bytes = bytes(hdr)
+            self.memo_block_size = bs
+        buf = bytearray(self.memo_bytes)
+        next_free = struct.unpack_from(">I", buf, 0)[0] or 1
+        pos = next_free * bs
+        nblocks = max(1, (8 + len(payload) + bs - 1) // bs)
+        needed = pos + nblocks * bs
+        if needed > len(buf):
+            buf.extend(b"\x00" * (needed - len(buf)))
+        struct.pack_into(">I", buf, pos, typ)
+        struct.pack_into(">I", buf, pos + 4, len(payload))
+        buf[pos + 8:pos + 8 + len(payload)] = payload
+        struct.pack_into(">I", buf, 0, next_free + nblocks)
+        self.memo_bytes = bytes(buf)
+        self.memo = (self.memo_bytes, bs)
+        return next_free
+
+    def set_field(self, rec_index: int, name: str, value) -> None:
+        """Overwrite one field in rec_index. Memo values allocate new blocks; empty memo → pointer 0."""
+        off, ln = self.field_offset(name)
+        f = next(x for x in self.fields if x.name == name)
+        if f.type == "M":
+            if value in (None, b"", ""):
+                self._patch_record(rec_index, off, struct.pack("<I", 0)[:ln].ljust(ln, b"\x00"))
+                return
+            payload = value if isinstance(value, bytes) else str(value).encode("latin1")
+            ptr = self._append_memo(payload, typ=1)
+            self._patch_record(rec_index, off, struct.pack("<I", ptr)[:ln])
+            return
+        if f.type == "L":
+            ch = b"T" if value else b"F"
+            self._patch_record(rec_index, off, ch[:ln].ljust(ln, b" "))
+            return
+        if f.type == "N":
+            if value in (None, ""):
+                blob = b" " * ln
+            else:
+                blob = str(value).rjust(ln)[:ln].encode("ascii")
+            self._patch_record(rec_index, off, blob)
+            return
+        raw = value if isinstance(value, bytes) else str(value).encode("latin1")
+        self._patch_record(rec_index, off, raw[:ln].ljust(ln, b" "))
+
+    def _memo_ptr_in(self, rec: bytes, name: str) -> int:
+        off, ln = self.field_offset(name)
+        if ln < 4:
+            return 0
+        return struct.unpack_from("<I", rec, off)[0]
+
+    def _memo_type(self, block: int) -> int:
+        if not block or not self.memo_bytes or not self.memo_block_size:
+            return 1
+        pos = block * self.memo_block_size
+        if pos + 8 > len(self.memo_bytes):
+            return 1
+        return struct.unpack_from(">I", self.memo_bytes, pos)[0]
+
+    def append_clone(self, rec_index: int, **fields) -> int:
+        """Duplicate rec_index with a fresh memo block per memo field, then overlay.
+
+        Carrying the source pointers aliases NAME/SYMBOLS/OBJECT; BUILD APP then
+        rejects the .pjt. Payload bytes are copied into a new block. Overlay
+        still goes through set_field.
+        """
+        if rec_index < 0 or rec_index >= len(self.record_bytes):
+            raise IndexError(rec_index)
+        src = self.record_bytes[rec_index]
+        self.record_bytes.append(bytes(src))
+        idx = len(self.record_bytes) - 1
+        for f in self.fields:
+            if f.type != "M":
+                continue
+            ptr = self._memo_ptr_in(src, f.name)
+            if not ptr:
+                continue
+            payload = self._memo(ptr)
+            new_ptr = self._append_memo(payload, typ=self._memo_type(ptr))
+            off, ln = self.field_offset(f.name)
+            packed = struct.pack("<I", new_ptr)[:ln].ljust(ln, b"\x00")
+            self._patch_record(idx, off, packed)
+        for name, value in fields.items():
+            self.set_field(idx, name, value)
+        return idx
+
+    def _overwrite_memo_same_length(self, block: int, payload: bytes) -> bool:
+        if not self.memo_bytes or not self.memo_block_size or not block:
+            return False
+        pos = block * self.memo_block_size
+        buf = self.memo_bytes
+        if pos + 8 > len(buf):
+            return False
+        _typ, length = struct.unpack_from(">II", buf, pos)
+        if length != len(payload):
+            return False
+        out = bytearray(buf)
+        out[pos + 8:pos + 8 + length] = payload
+        self.memo_bytes = bytes(out)
+        self.memo = (self.memo_bytes, self.memo_block_size)
+        return True
+
+    def reconstruct_methods(self, rec_index: int, methods: bytes,
+                            clear_objcode: bool = True) -> list[dict]:
+        """Replace METHODS for one record; optionally zero the OBJCODE pointer.
+
+        Same-length METHODS overwrite the payload in place. A length change
+        appends new memo blocks and retargets the pointer; the old block stays.
+        OBJCODE is cleared by writing a zero pointer — the old OBJCODE block
+        is left in the sidecar. Returned intents name every mutated range.
+        """
+        intents: list[dict] = []
+        before_dbf, before_memo = self.serialize()
+        m_off, m_len = self.field_offset("METHODS")
+        rec = self.record_bytes[rec_index]
+        old_ptr = struct.unpack_from("<I", rec, m_off)[0] if m_len >= 4 else 0
+        if not self._overwrite_memo_same_length(old_ptr, methods):
+            new_ptr = self._append_memo(methods, typ=1)
+            self._patch_record(rec_index, m_off, struct.pack("<I", new_ptr))
+        if clear_objcode:
+            o_off, o_len = self.field_offset("OBJCODE")
+            if o_len >= 4:
+                self._patch_record(rec_index, o_off, struct.pack("<I", 0))
+        after_dbf, after_memo = self.serialize()
+        for start, end in changed_ranges(before_dbf, after_dbf):
+            intents.append({"file": "table", "start": start, "end": end,
+                            "intent": "METHODS/OBJCODE pointer"})
+        if before_memo is not None and after_memo is not None:
+            for start, end in changed_ranges(before_memo, after_memo):
+                intents.append({"file": "memo", "start": start, "end": end,
+                                "intent": "METHODS payload or next-free"})
+        elif before_memo != after_memo:
+            intents.append({"file": "memo", "start": 0,
+                            "end": len(after_memo or b""),
+                            "intent": "METHODS payload or next-free"})
+        return intents
+
+
+def write_table(table: Table, path: Path) -> None:
+    """Serialize table + memo sidecar. Refuses destinations under the corpus root."""
+    path = Path(path)
+    refuse_corpus_dest(path)
+    dbf, memo = table.serialize()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(dbf)
+    if memo is None:
+        return
+    ext = MEMO_EXT.get(path.suffix.lower())
+    if not ext:
+        return
+    side = path.with_suffix(ext)
+    refuse_corpus_dest(side)
+    side.write_bytes(memo)
 
 
 def table_codec(path: Path) -> str | None:

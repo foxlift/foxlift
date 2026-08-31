@@ -27,6 +27,8 @@ class OracleError(RuntimeError):
 
 
 def _ssh(args, **kw):
+    kw.setdefault("encoding", "utf-8")
+    kw.setdefault("errors", "replace")
     return subprocess.run(["ssh", *_SSH_OPTS, VM, *args],
                           capture_output=True, text=True, **kw)
 

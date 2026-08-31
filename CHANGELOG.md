@@ -3,6 +3,38 @@
 FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the version in
 `pyproject.toml`.
 
+## 0.3.0 — 2026-08-31
+
+Application extraction, and closed parity on the development corpus.
+
+- New command `foxlift extract`: unpack a compiled `.app` or `.exe` into a named
+  project tree using only the container's own directory — compiled `.fxp`/`.mpx`
+  members are lifted back to `.prg`/`.mpr` source, form and class tables are
+  reconstructed with their method source restored, tables, memo sidecars, and
+  raw resources are preserved byte-for-byte, and the startup program is
+  detected from its measured container marker.
+- Project reassembly: `foxlift.project` builds a `.pjx` project table from an
+  extracted tree; Visual FoxPro 9 rebuilds the result with `BUILD APP` /
+  `BUILD EXE` (rebuilding requires VFP9; extraction does not).
+- Statement coverage from four measurement rounds: bare `THROW`; `SUSPEND`;
+  `INSERT BLANK` / `INSERT BEFORE BLANK` / `INSERT INTO … FROM NAME`;
+  `SELECT … HAVING` and aggregates over full expressions, nested calls
+  included; `CREATE TABLE … FREE`; `APPEND FROM` / `COPY TO` file-type
+  clauses; `SHOW` / `HIDE WINDOW`; `MODIFY` editing-window clauses; the
+  `@ … SAY` command; `EXTERNAL` kinds; and completed system-menu name tables.
+- Source-order recovery: clauses the compiler stores in one canonical order
+  (`LOCATE`, `COUNT`, `SUM`, `REPLACE … ALL`, `SELECT … INTO`) are emitted in
+  the order the source wrote them, recovered from the section symbol table.
+- Literal fidelity: integer literals reproduce their stored spelling (decimal,
+  zero-padded, or hex — measured width laws); string literals keep their
+  original delimiter; high-byte (GBK) strings stay quoted; `TEXT … ENDTEXT`
+  bodies are preserved verbatim, indentation included.
+- Measured parity at release: on the development corpus every method section
+  lifts (10,514 of 10,514); recompiling the output on real VFP9 reproduces the
+  original bytecode frames for 29,579 of 29,597 form and class sections and
+  2,007 of 2,007 validation sections. Every remaining difference is an
+  oracle-proven, documented loss in compilation — never a guess.
+
 ## 0.2.0 — 2026-08-28
 
 Compiled-program support and a measured round-trip baseline.

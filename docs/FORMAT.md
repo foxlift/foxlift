@@ -51,7 +51,11 @@ immediately before the class-init section: `<u16 nlen> <name> <u32> <u32>`, with
 the last u32 overlapping the next section marker. Names include ADD OBJECT
 events (`object.event`). Each class-init `a2`/`a3`/`9e` INT32 is a 1-based
 index into that list (public / PROTECTED / HIDDEN). A non-class program has
-zero class records. See `foxlift.container.class_identities` and
+zero class records. The same `object.event` spelling rides the non-class
+procedure directory (`<u16 nlen> <name> <u32> <u16 0> <u16 0xffff>`) of
+COMPILE FORM METHODS (commandgroup `cdSave.Click`); a standalone PRG
+`PROCEDURE cdSave.Click` is rejected (r44-stmtcount). See
+`foxlift.container.class_identities`, `procedure_names`, and
 `probes/oracle_harvest/round43_fxphdr_batch.py`.
 
 ## 3. Code sections
@@ -336,6 +340,14 @@ no UI involved - designates the build entry point, which is what makes a
 generated project buildable headlessly via BUILD APP ... FROM ... RECOMPILE.
 This is load-bearing for phases 5 and 6: generated projects must emit exactly
 one MAINPROG=.T. row.
+
+**TIMESTAMP N(10) is a DOS-packed local datetime**
+`((yy-1980)<<25 | mm<<21 | dd<<16 | hh<<11 | mi<<5 | ss/2)` with even
+seconds. A member whose TIMESTAMP matches its source file mtime is fresh:
+BUILD APP skips that compile. Measured 2026-08-29 against builder bytes:
+1562204634 = 11:14:52; 1562206208 = 12:00:00. The builder's own TIMESTAMP
+for a given mtime is the value to write — a naive pack of 12:00:00 was
+1562206208, the builder wrote 1562206209 for the same guest LastWriteTime.
 
 Reader/writer: foxlift/pjx.py (schema as data in _FIELDS); round-trip tests
 against fb2p_test.pjx in tests/test_pjx.py.

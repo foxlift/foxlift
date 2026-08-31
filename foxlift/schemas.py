@@ -305,6 +305,18 @@ ZOOM_WINDOW_MODES = {0xBE: "MAX", 0xBF: "MIN", 0xD6: "NORM"}   # f20/f22/f23 +
                           # oracle REJECTS 'ZOOM WINDOW w1 BOGUS' outright (f30)
 ACTIVATE_WIN_SAME = 0xCF  # 74 2c cf <name> = ACTIVATE WINDOW <name> SAME (f21);
                           # siblings measured but not carried: TOP=29, BOTTOM=36
+# APPEND FROM / COPY TO file types, one byte each and no WITH tail except
+# DELIMITED's (r48-valsweep: `APPEND FROM t SDF` -> 0615fb010074d0,
+# TYPE FOXPLUS -> …d4bd, TYPE XL5 -> …d4bb, TYPE XLS -> …d4c7,
+# TYPE DELIMITED -> …d4be). The optional d4 records only that the source
+# spelled the word TYPE (r47-typeword).
+FILE_TYPE_WORDS = {0xD0: "SDF", 0xBE: "DELIMITED", 0xC7: "XLS",
+                   0xBB: "XL5", 0xBD: "FOXPLUS"}
+# SHOW WINDOW's own modifier bank, between the 2c and the name (r48-valsweep:
+# `SHOW WINDOW w REFRESH` -> 802cc4f70000, TOP -> 802c29f70000, BOTTOM ->
+# 802c36f70000, SAME -> 802ccff70000). HIDE WINDOW (0x87) takes none of them.
+SHOW_WINDOW_MODIFIERS = {0xC4: "REFRESH", 0x29: "TOP", 0x36: "BOTTOM",
+                         0xCF: "SAME"}
 POPUP_SHORTCUT_MARK = 0x57  # SHORTCUT flag (g1 isolation — pre-run cc/57 guess REFUTED)
 POPUP_RELATIVE_MARK = 0xCC  # RELATIVE flag (g2 isolation)
 BAR_PROMPT_MARK = 0x22        # BAR PROMPT fc<str>fd (g3)
@@ -493,6 +505,28 @@ SET_NOTIFY_CURSOR_MARK = 0xBD
 # TO <pad> / TO <pad>, <pad> is 47 59 28 fc ec <id> [fd 07 fc ec <id> …]
 # (r43-sysmenu extra: _MFILE = 0x23, _MEDIT = 0x39). Pad ids are a
 # different namespace from MENU_BAR_IDS (0x39 there is _MED_UNDO).
+# r49-valsweep: the `@ <row>, <col> …` command. SAY's clause byte and its
+# PICTURE byte are the same two BROWSE's :H/:P field attributes use.
+# r49-menusweep: the system-menu POPUP ids, compiled one per program under
+# `DEFINE BAR n OF <name>`. A name the compiler knows rides `c3 ec <id>`; one
+# it does not know (_MFORMAT, _MHELP on this VFP9) stays an ordinary symbol
+# operand, which is the control that keeps this table honest. Same `ec` marker
+# the DEFINE BAR system-menu BAR ids use, in a different slot and namespace.
+MENU_POPUP_IDS = {0x02: "_MSYSMENU", 0x23: "_MFILE", 0x39: "_MEDIT",
+                  0x70: "_MPROG", 0x7D: "_MWINDOW", 0x8E: "_MVIEW",
+                  0x90: "_MTOOLS"}
+
+# r49-valsweep: EXTERNAL's kind bank, compiled in one matrix. ARRAY (04) and
+# CLASS (4f) keep their own arms — an ARRAY names symbols, a CLASS a raw
+# payload — and these five share one name operand. LABEL, MENU and QUERY exist
+# in the language, are not measured here, and stay refused.
+EXTERNAL_NAME_KINDS = {0x12: "FILE", 0x14: "FORM", 0x26: "SCREEN",
+                       0x33: "REPORT", 0xBE: "PROCEDURE"}
+
+AT_LEAD = 0x04
+AT_SAY_MARK = 0xC4
+AT_PICTURE_MARK = 0xC2
+
 SET_SYSMENU_ID = 0x59
 SET_SYSMENU_AUTOMATIC_MARK = 0xBC
 SET_SYSMENU_SAVE_MARK = 0x25
@@ -703,7 +737,16 @@ SQLSEL_ORDER_MARK = (0xC7, 0xC3)
 SQLSEL_DESC_MARK = 0x3C
 SQLSEL_TOP_MARK = 0x29  # SELECT TOP n: 29 fc <n> [fd] before INTO (r42-seltop).
                         # Collides with GO TOP 0x29; SQL-local.
+INSERT_FROM_NAME = 0x4A  # INSERT INTO <t> FROM NAME <obj>: 15 4a <name>
+                         # beside the c2 MEMVAR selector (r47-insertforms)
+INSERT_BLANK_LEAD = 0x28  # INSERT BLANK is 28 08; BEFORE appends be
+INSERT_BLANK_MARK = 0x08
+INSERT_BEFORE_MARK = 0xBE
+SUSPEND_LEAD = 0x4C      # one-byte SUSPEND (r47-suspend; r42 cmd sweep)
 SQLSEL_GROUP_MARK = 0xBF  # SELECT GROUP BY: bf fc <n> fd [07 fc <n> fd]*
+SQLSEL_HAVING_MARK = 0xC0  # SELECT HAVING: c0 fc <cond> fd, after GROUP BY
+                           # and before ORDER BY (r47-having). The byte is
+                           # context-local: under CREATE TABLE it is FREE.
                           # after WHERE, before ORDER BY (r42-selgroup).
                           # Collides with WINDOW()/FLOAT elsewhere; SQL-local.
 SQLSEL_AGG_STAR = 0x04    # COUNT(*) operand inside a 43-group (r42-tiera3).
@@ -853,6 +896,12 @@ MEASURED_LOCAL_GROUP_CLOSERS = {
                     # raw-equal to _reports.vcx::_output #10 modulo symbol index)
                     # and 'qq = WONTOP("w1")' -> 54f7000010fc43d902007731be (f28).
                     # Name read from the generated registry at point of use.
+    # r49-valsweep: the window-metric quartet, compiled side by side —
+    # 'x = WLROW("w")' -> 43 d9…w c9, and WLCOL c8, WROWS b7, WCOLS b6. WLROW
+    # and WCOLS already had gates; these two are their neighbours, and only the
+    # one-argument spelling is measured.
+    0xC8: (1, 1),   # WLCOL
+    0xB7: (1, 1),   # WROWS
     0xC0: (0, 1),   # WVISIBLE — r43-class: 'x = WVISIBLE()' -> 43 c0;
                     # 'x = WVISIBLE('trace')' -> 43 fb… c0. Two args unmeasured.
     0x85: (0, 1),   # PROMPT — r43-prompt: 'x = PROMPT()' -> 43 85;
@@ -864,6 +913,9 @@ MEASURED_LOCAL_GROUP_CLOSERS = {
                     # positions (/tmp/foxlift-r35-impl-closers census), both
                     # sightings stored-source aligned. Name read from the
                     # generated registry at point of use.
+    0x9B: (1, 26),  # ALLTRIM — r44-arity compile_dir (vmlock r44-arity):
+                    # ALLTRIM() too-few; ALLTRIM(c) through 26 args compile;
+                    # 27 args too-many. function_ids.json arity stays "?".
 }
 if not set(MEASURED_LOCAL_GROUP_CLOSERS) <= BUILTIN_BARE.keys():
     raise AssertionError("local-arity bare closer missing from measured registry")
@@ -883,6 +935,9 @@ if not set(MEASURED_LOCAL_GROUP_CLOSERS) <= BUILTIN_BARE.keys():
 # id -> (min args, max args). Name stays a generated-registry property.
 MEASURED_EA_GROUP_CLOSERS = {
     0x78: (1, 4),
+    0x11: (2, 6),  # ASCAN — r44-arity: ASCAN() / ASCAN(a) too-few;
+                   # ASCAN(a, e) through six args compile; seven too-many.
+                   # function_ids.json arity stays "?".
 }
 if not set(MEASURED_EA_GROUP_CLOSERS) <= BUILTIN_ESCAPES.keys():
     raise AssertionError("ea-arity closer missing from measured registry")
@@ -964,13 +1019,17 @@ WORKAREA_REF = 0xF5 # f5 <id>: 0D = memory-variable reference (m.<name>, next to
                      # ids stay Unsupported.
 # Bare ids with corpus-aligned closing behavior. Their oracle arity samples are not complete
 # enough to reject calls by argument count, so parser policy remains a set separate from names.
+# VAL (0x67) left this set in r44-arity: registry arity "1" is the measured envelope
+# (VAL() too-few, VAL(c) compiles, VAL(c, n) too-many). ALLTRIM (0x9B) left for
+# MEASURED_LOCAL_GROUP_CLOSERS (1, 26). UPPER (0x66) left: registry arity "1";
+# 2-arg stock was ALLTRIM(UPPER(i, arr)) which VFP rejects (r44-g3g4 _reportlistener).
 CORPUS_ALIGNED_BARE_CLOSERS = frozenset({
     0x19, 0x1B, 0x1C, 0x1D, 0x1E, 0x20, 0x21, 0x23, 0x24, 0x25, 0x27, 0x29,
     0x2A, 0x2B, 0x2E, 0x2F, 0x30, 0x34, 0x35, 0x36, 0x38, 0x39, 0x3B, 0x3C,
     0x3D, 0x3E, 0x40, 0x44, 0x46, 0x48, 0x4A, 0x4E, 0x4F, 0x51, 0x52, 0x54,
-    0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F, 0x66, 0x67, 0x68,
+    0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F, 0x68,
     0x69, 0x74, 0x75, 0x76, 0x77, 0x7A, 0x7B, 0x83, 0x86, 0x89, 0x8A, 0x8B,
-    0x8D, 0x8E, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9B,
+    0x8D, 0x8E, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99,
     0x9D, 0x9E, 0xA1, 0xA2, 0xA5, 0xA7, 0xA8, 0xAA, 0xAB, 0xAD, 0xAE, 0xAF,
     0xB0, 0xB1, 0xB2, 0xB8, 0xBA, 0xBB, 0xC1, 0xC2, 0xC4, 0xCB, 0xCE, 0xD1,
     0xD2,
@@ -1099,22 +1158,71 @@ MOVE_POPUP_LEAD = 0x7A        # 7a c6 f7<sym> 28 fc<row>fd 07 fc<col> (e06; …:
 # looking free when they are bound. Candidate names come from a grep of the VFP 9
 # install tree for `_M[A-Z][A-Z]_[A-Z0-9]+`, never from memory. No id measured in
 # round 41 contradicts a round-37 row; the table only grew.
+#
+# Round 49 finished it. Rounds 37/40/41/43 each swept whichever menu block that
+# round happened to need; round49_barnames_batch.py sweeps all 258 `_Mxx_*` names
+# the install-tree grep finds, in the three slots that take one — the bar-NUMBER
+# slot, BEFORE/AFTER's neighbour slot and PICTRES — in a single compile. 223 bind;
+# a bound name takes the same id in all three slots and distinct names take
+# distinct ids. The other 30 are foxpro.h constants and menu PAD names that ride
+# along (_MAX_WIDTH, _MSG_ERROR, _MSM_HELP) and compile to ordinary symbol
+# operands: the fall-back control that keeps every row a name VFP9 itself binds.
+# No id contradicts a round-37/40/41/43 row, and 0x39 — the anchor the historical
+# shifted reading below depends on — is still unbound.
 MENU_BAR_ID_MARK = 0xEC
 MENU_BAR_IDS = {
+    0x03: "_MSM_SYSTM",
+    0x04: "_MSM_FILE",
+    0x05: "_MSM_EDIT",
+    0x06: "_MSM_DATA",
+    0x07: "_MSM_RECRD",
+    0x08: "_MSM_PROG",
+    0x09: "_MSM_WINDO",
+    0x0A: "_MSM_VIEW",
+    0x0B: "_MSM_TOOLS",
+    0x0C: "_MSM_FORMAT",
+    0x0E: "_MST_OFFICE",
+    0x0F: "_MST_HELP",
     0x10: "_MST_HPSCH",
+    0x11: "_MST_HPHOW",
+    0x12: "_MST_MACRO",
+    0x13: "_MST_SP100",
+    0x14: "_MST_FILER",
+    0x15: "_MST_CALCU",
+    0x16: "_MST_DIARY",
+    0x17: "_MST_SPECL",
+    0x18: "_MST_ASCII",
+    0x19: "_MST_CAPTR",
+    0x1A: "_MST_PUZZL",
+    0x1B: "_MST_SP200",
+    0x1C: "_MST_DBASE",
+    0x1D: "_MST_SP300",
+    0x1E: "_MST_TECHS",
+    0x1F: "_MST_ABOUT",
+    0x20: "_MST_DOCUM",
+    0x21: "_MST_SAMP",
+    0x22: "_MST_VFPWEB",
     0x24: "_MFI_NEW",
     0x25: "_MFI_OPEN",
     0x26: "_MFI_CLOSE",
     0x27: "_MFI_CLALL",
     0x28: "_MFI_SP100",
     0x29: "_MFI_SAVE",
+    0x2A: "_MFI_SAVAS",
+    0x2B: "_MFI_REVRT",
     0x2C: "_MFI_SP200",
+    0x2D: "_MFI_SETUP",
     0x2E: "_MFI_PRINT",
     0x2F: "_MFI_SYSPRINT",
+    0x30: "_MFI_PRINTONECOPY",
     0x31: "_MFI_SP300",
     0x32: "_MFI_QUIT",
     0x33: "_MFI_PREVU",
     0x34: "_MFI_PGSET",
+    0x35: "_MFI_IMPORT",
+    0x36: "_MFI_EXPORT",
+    0x37: "_MFI_SP400",
+    0x38: "_MFI_SEND",
     0x3A: "_MED_UNDO",
     0x3B: "_MED_REDO",
     0x3C: "_MED_SP100",
@@ -1127,6 +1235,7 @@ MENU_BAR_IDS = {
     0x43: "_MED_INSOB",
     0x44: "_MED_OBJ",
     0x45: "_MED_LINK",
+    0x46: "_MED_CVTST",
     0x47: "_MED_SP300",
     0x48: "_MED_SLCTA",
     0x49: "_MED_SP400",
@@ -1134,17 +1243,171 @@ MENU_BAR_IDS = {
     0x4B: "_MED_FIND",
     0x4C: "_MED_FINDA",
     0x4D: "_MED_REPL",
+    0x4E: "_MED_REPLA",
     0x4F: "_MED_SP500",
+    0x50: "_MED_BEAUT",
     0x51: "_MED_PREF",
+    0x53: "_MDA_SETUP",
+    0x54: "_MDA_BROW",
+    0x55: "_MDA_SP100",
+    0x56: "_MDA_APPND",
+    0x57: "_MDA_COPY",
+    0x58: "_MDA_SORT",
+    0x59: "_MDA_TOTAL",
+    0x5A: "_MDA_SP200",
+    0x5B: "_MDA_AVG",
+    0x5C: "_MDA_COUNT",
+    0x5D: "_MDA_SUM",
+    0x5E: "_MDA_CALC",
+    0x5F: "_MDA_REPRT",
+    0x60: "_MDA_LABEL",
+    0x61: "_MDA_SP300",
+    0x62: "_MDA_PACK",
+    0x63: "_MDA_RINDX",
+    0x65: "_MRC_APPND",
+    0x66: "_MRC_CHNGE",
+    0x67: "_MRC_SP100",
+    0x68: "_MRC_GOTO",
+    0x69: "_MRC_LOCAT",
+    0x6A: "_MRC_CONT",
+    0x6B: "_MRC_SEEK",
+    0x6C: "_MRC_SP200",
+    0x6D: "_MRC_REPL",
+    0x6E: "_MRC_DELET",
+    0x6F: "_MRC_RECAL",
+    0x71: "_MPR_DO",
+    0x72: "_MPR_SP100",
+    0x73: "_MPR_CANCL",
+    0x74: "_MPR_RESUM",
+    0x75: "_MPR_SP200",
+    0x76: "_MPR_COMPL",
+    0x77: "_MPR_GENER",
+    0x78: "_MPR_SP300",
+    0x79: "_MPR_BEAUT",
+    0x7A: "_MPR_DOCUM",
+    0x7B: "_MPR_GRAPH",
+    0x7C: "_MPR_SUSPEND",
     0x7E: "_MWI_ARRAN",
     0x7F: "_MWI_HIDE",
+    0x80: "_MWI_HIDEA",
+    0x81: "_MWI_SHOWA",
+    0x82: "_MWI_CLEAR",
+    0x83: "_MWI_SP100",
     0x84: "_MWI_MOVE",
     0x85: "_MWI_SIZE",
     0x86: "_MWI_ZOOM",
     0x87: "_MWI_MIN",
+    0x88: "_MWI_ROTAT",
+    0x89: "_MWI_COLOR",
+    0x8A: "_MWI_SP200",
+    0x8B: "_MWI_CMD",
+    0x8C: "_MWI_VIEW",
+    0x8D: "_MVI_TOOLB",
+    0x91: "_MTL_WZRDS",
+    0x92: "_MTL_SP100",
+    0x93: "_MTL_SP200",
+    0x94: "_MTL_SP300",
+    0x95: "_MTL_SP400",
+    0x96: "_MTL_OPTNS",
+    0x97: "_MTL_BROWSER",
+    0x98: "_MTI_FOXCODE",
+    0x99: "_MTL_DEBUGGER",
+    0x9A: "_MTI_TRACE",
+    0x9B: "_MWI_TRACE",
+    0x9C: "_MTI_WATCH",
+    0x9D: "_MWI_DEBUG",
+    0x9E: "_MTI_LOCALS",
+    0x9F: "_MTI_DBGOUT",
+    0xA0: "_MTI_CALLSTACK",
+    0xA4: "_MBR_MODE",
+    0xA5: "_MBR_GRID",
+    0xA6: "_MBR_LINK",
+    0xA7: "_MBR_CPART",
+    0xA8: "_MBR_SP100",
+    0xA9: "_MBR_FONT",
+    0xAA: "_MBR_SZFLD",
+    0xAB: "_MBR_MVFLD",
+    0xAC: "_MBR_MVPRT",
+    0xAD: "_MBR_SP200",
+    0xAE: "_MBR_GOTO",
+    0xAF: "_MBR_SEEK",
+    0xB0: "_MBR_DELET",
+    0xB1: "_MBR_APPND",
+    0xB7: "_MMB_GOPTS",
+    0xB8: "_MMB_MOPTS",
+    0xB9: "_MMB_SP100",
+    0xBA: "_MMB_PREVU",
+    0xBB: "_MMB_SP200",
+    0xBC: "_MMB_INSRT",
+    0xBD: "_MMB_INSBR",
+    0xBE: "_MMB_DELET",
+    0xBF: "_MMB_SP300",
+    0xC0: "_MMB_QUICK",
+    0xC1: "_MMB_GENER",
+    0xC4: "_MSM_TEXT",
+    0xC6: "_MWZ_TABLE",
+    0xC7: "_MWZ_QUERY",
+    0xC8: "_MWZ_FORM",
+    0xC9: "_MWZ_REPRT",
+    0xCA: "_MWZ_LABEL",
+    0xCB: "_MWZ_MAIL",
+    0xCC: "_MWZ_PIVOT",
+    0xCD: "_MWZ_IMPORT",
+    0xCE: "_MWZ_FOXDOC",
     0xCF: "_MWZ_UPSIZING",
+    0xD0: "_MWZ_ALL",
+    0xD2: "_MTB_PROPS",
+    0xD3: "_MTB_SP100",
+    0xD4: "_MTB_GOTO",
+    0xD5: "_MTB_APPND",
+    0xD6: "_MTB_DELRC",
+    0xD7: "_MTB_SP200",
+    0xD8: "_MTB_DELET",
+    0xD9: "_MTB_RECAL",
+    0xDA: "_MTB_SZFLD",
+    0xDB: "_MTB_MVFLD",
+    0xDC: "_MTB_MVPRT",
+    0xDD: "_MTB_SP300",
+    0xDE: "_MTB_LINK",
+    0xDF: "_MTB_CPART",
+    0xE0: "_MTB_SP400",
+    0xE2: "_MFI_SAVEASHTML",
+    0xE4: "_MST_MSDNC",
+    0xE5: "_MST_MSDNI",
+    0xE6: "_MST_MSDNS",
+    0xE8: "_MWZ_APPLICATION",
+    0xE9: "_MWZ_DATABASE",
     0xEA: "_MWZ_WEBPUBLISHING",
     0xEB: "_MWZ_WEBSERVICES",
+    0xED: "_MTL_GALLERY",
+    0xEE: "_MTL_COVERAGE",
+    0xEF: "_MTI_TASKLIST",
+    0xF0: "_MTI_OBJECTBROWSER",
+    0xF1: "_MTI_DOCVIEW",
+    0xF2: "_MTI_BREAKPOINT",
+    0xF4: "_MED_LISTMEMBERS",
+    0xF5: "_MED_QUICKINFO",
+    0xF6: "_MED_BKMKS",
+    0xF8: "_MBK_TOGTASK",
+    0xF9: "_MBK_TOGBKMK",
+    0xFA: "_MBK_BKMKNEXT",
+    0xFB: "_MBK_BKMKPREV",
+    0xFD: "_MWI_CASCADE",
+    0xFE: "_MWI_DOCKABLE",
+}
+
+# Five VFP9-era bars sit in a SECOND bank behind an 0xff escape: the id group is
+# `fc ec ff <id> fd` instead of `fc ec <id> fd`. Whether 0xff is an escape byte
+# or the high half of a wider field is not measured — only five names ride it,
+# and every one of them spells `ec ff <low>`. Kept as its own table so no reading
+# can merge the banks and hand a bar the other bank's name.
+MENU_BAR_ID_WIDE_MARK = 0xFF
+MENU_BAR_IDS_WIDE = {
+    0x00: "_MWI_PROPERTIES",
+    0x02: "_MMB_MOVEITM",
+    0x05: "_MTL_TASKPANE",
+    0x06: "_MTL_TOOLBOX",
+    0x07: "_MTL_REFERENCES",
 }
 # One corpus artifact (mhxpcontrol.vcx::edit) was built by an older VFP whose Edit-block
 # ids sit exactly one BELOW the current table: its stored source names six bars whose

@@ -44,6 +44,9 @@ END_STMT = 0xFE
 ESCAPE = 0xEA                     # escape prefix introducing VFP's second function range
 PROLOGUE_U16 = 3
 PROLOGUE_U32 = 5
+PROLOGUE_BASE = 40
+# ^ the module header the procedure directory's offsets are measured from:
+#   entry u32 + PROLOGUE_BASE is the section's own offset (r48-nonames).
 SECTION_TERMINATOR = b"\x03\x00"
 
 # Two kinds of statement are stored as VERBATIM SOURCE rather than compiled, sharing one
@@ -243,26 +246,39 @@ def class_identities(buf: bytes, off: int = 0,
         return []
     if not mod.sections:
         return []
-    pos = _skip_symbol_table(buf, mod.sections[-1].end + 2, end)
-    recs: list[ClassIdentity] = []
-    while pos + 6 <= end:
-        nlen = _u16le(buf, pos)
-        if not (1 <= nlen <= 128) or pos + 2 + nlen + 2 > end:
-            break
-        name = _ident_bytes(buf[pos + 2:pos + 2 + nlen])
-        if name is None:
-            break
-        j = pos + 2 + nlen
-        blen = _u16le(buf, j)
-        if not (1 <= blen <= 128) or j + 2 + blen + 6 > end:
-            break
-        base = _ident_bytes(buf[j + 2:j + 2 + blen])
-        if base is None:
-            break
-        k = j + 2 + blen
-        ole = _u16le(buf, k + 4)
-        recs.append(ClassIdentity(name=name, as_base=base, olepublic=ole == 1))
-        pos = k + 6
+
+    def _read_recs(anchor) -> list:
+        pos = _skip_symbol_table(buf, anchor.end + 2, end)
+        out: list[ClassIdentity] = []
+        while pos + 6 <= end:
+            nlen = _u16le(buf, pos)
+            if not (1 <= nlen <= 128) or pos + 2 + nlen + 2 > end:
+                break
+            name = _ident_bytes(buf[pos + 2:pos + 2 + nlen])
+            if name is None:
+                break
+            j = pos + 2 + nlen
+            blen = _u16le(buf, j)
+            if not (1 <= blen <= 128) or j + 2 + blen + 6 > end:
+                break
+            base = _ident_bytes(buf[j + 2:j + 2 + blen])
+            if base is None:
+                break
+            k = j + 2 + blen
+            ole = _u16le(buf, k + 4)
+            out.append(ClassIdentity(name=name, as_base=base, olepublic=ole == 1))
+            pos = k + 6
+        return out
+
+    recs = _read_recs(mod.sections[-1])
+    nonempty = [s for s in mod.sections if not s.is_empty]
+    # r46-classinit: a phantom empty section can parse out of the FXP
+    # footer after the class directory. If the last section is empty and
+    # yielded no records, retry at the last nonempty section (class-init).
+    # A real empty class section still has the directory after it — the
+    # first try succeeds (mixed top-level + empty class).
+    if not recs and mod.sections[-1].is_empty and nonempty:
+        recs = _read_recs(nonempty[-1])
     if not recs:
         return []
     # Method names sit in one directory immediately before the first
@@ -271,11 +287,16 @@ def class_identities(buf: bytes, off: int = 0,
     # by any index are leftover module-level procedures, not class members.
     nclass = len(recs)
     secs = mod.sections
-    if len(secs) >= nclass + 1:
-        inits = secs[-nclass:]
-        prev = secs[-nclass - 1] if len(secs) > nclass else None
+    inits = nonempty[-nclass:] if len(nonempty) >= nclass else nonempty
+    if inits:
+        first_init = inits[0]
+        prev = None
+        for s in secs:
+            if s is first_init:
+                break
+            prev = s
         if prev is not None:
-            names = _method_names(buf, prev.end + 2, inits[0].offset)
+            names = _method_names(buf, prev.end + 2, first_init.offset)
             for rec, sec in zip(recs, inits):
                 rec.methods = []
                 rec.method_vis = []
@@ -302,7 +323,9 @@ def procedure_names(buf: bytes, off: int = 0,
     r43 G3: generated menus compile an unnamed main section plus
     ``<u16 nlen> <name> <u32> <u16 0> <u16 0xffff>`` records. Class
     files use :func:`class_identities` instead (their next record is
-    AS-base, not a 0xffff trailer).
+    AS-base, not a 0xffff trailer). Names may be ``object.event``
+    (COMPILE FORM METHODS of a commandgroup; a PRG
+    ``PROCEDURE cdSave.Click`` is rejected — r44-stmtcount).
     """
     if end is None:
         end = len(buf)
@@ -320,7 +343,7 @@ def procedure_names(buf: bytes, off: int = 0,
         nlen = _u16le(buf, pos)
         if not (1 <= nlen <= 128) or pos + 2 + nlen + 8 > end:
             break
-        ident = _ident_bytes(buf[pos + 2:pos + 2 + nlen])
+        ident = _ident_bytes(buf[pos + 2:pos + 2 + nlen], dotted=True)
         if ident is None:
             break
         trailer = buf[pos + 2 + nlen:pos + 2 + nlen + 8]
@@ -329,6 +352,53 @@ def procedure_names(buf: bytes, off: int = 0,
         names.append(ident)
         pos += 2 + nlen + 8
     return names
+
+
+def procedure_directory(buf: bytes, off: int = 0,
+                        end: int | None = None) -> list[tuple[str, int]]:
+    """(name, section offset - PROLOGUE_BASE) for a record whose directory the
+    last-section scan cannot reach.
+
+    r48-nonames: a form record's OBJCODE can end on an EMPTY footer section, so
+    :func:`procedure_names` — which scans from after the LAST section — starts
+    past the directory and reports none. The directory is the same r43-G3
+    ``<u16 nlen> <name> <u32 offset> <u16 0> <u16 0xffff>`` shape, sitting after
+    the last NON-EMPTY section's symbol table, the position
+    :func:`class_identities` already retries around. Its u32 is the section's
+    own offset minus the module prologue, so the name BINDS to a section rather
+    than pairing by position (exact on both carriers, 12/12 and 9/9 entries).
+    """
+    if end is None:
+        end = len(buf)
+    if class_identities(buf, off, end):
+        return []
+    try:
+        mod = parse(buf, off)
+    except ValueError:
+        return []
+    nonempty = [s for s in mod.sections if not s.is_empty]
+    if not nonempty:
+        return []
+    pos = _skip_symbol_table(buf, nonempty[-1].end + 2, end)
+    out: list[tuple[str, int]] = []
+    while pos + 10 <= end:
+        nlen = _u16le(buf, pos)
+        if not (1 <= nlen <= 128) or pos + 2 + nlen + 8 > end:
+            break
+        ident = _ident_bytes(buf[pos + 2:pos + 2 + nlen], dotted=True)
+        if ident is None:
+            break
+        trailer = buf[pos + 2 + nlen:pos + 2 + nlen + 8]
+        if trailer[6:8] != b"\xff\xff":
+            break
+        out.append((ident, int.from_bytes(trailer[0:4], "little")))
+        pos += 2 + nlen + 8
+    offsets = {s.offset for s in mod.sections}
+    if not out or any(o + PROLOGUE_BASE not in offsets for _, o in out):
+        # Without the offset binding these are bytes that merely look like a
+        # directory; an unbound name is worse than no name.
+        return []
+    return out
 
 
 @dataclass

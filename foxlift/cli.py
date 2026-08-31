@@ -257,6 +257,16 @@ def cmd_decompile(args):
     sys.exit(0 if verified else 2)
 
 
+def cmd_extract(args):
+    from foxlift.extract import extract_container
+
+    path = Path(args.input)
+    outdir = Path(args.outdir)
+    result = extract_container(path, outdir)
+    _emit(result, args.json)
+    sys.exit(0 if result["landed"] == result["n_entries"] and not result["misses"] else 2)
+
+
 # --- main --------------------------------------------------------------------------------
 
 def main():
@@ -280,8 +290,20 @@ def main():
     p_d.add_argument("-o", "--outdir", required=True, help="output directory")
     p_d.add_argument("--json", action="store_true", help="JSON output")
 
+    p_e = sub.add_parser(
+        "extract",
+        help="extract an APP/EXE container to a named project tree",
+    )
+    p_e.add_argument("input", help="input .app or .exe")
+    p_e.add_argument("-o", "--outdir", required=True, help="output directory")
+    p_e.add_argument("--json", action="store_true", help="JSON output")
+
     args = parser.parse_args()
-    dispatch = {"inspect": cmd_inspect, "decompile": cmd_decompile}
+    dispatch = {
+        "inspect": cmd_inspect,
+        "decompile": cmd_decompile,
+        "extract": cmd_extract,
+    }
     fn = dispatch.get(args.command)
     if fn is None:
         parser.print_help()

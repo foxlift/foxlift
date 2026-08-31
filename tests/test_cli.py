@@ -49,7 +49,7 @@ def test_version_exits_zero():
 def test_package_module_entrypoint_uses_public_cli():
     r = _run('--help', module='foxlift')
     assert r.returncode == 0, r.stderr[:100]
-    assert '{inspect,decompile}' in r.stdout
+    assert 'inspect' in r.stdout and 'decompile' in r.stdout and 'extract' in r.stdout
 
 
 def test_unknown_score_command_is_rejected():

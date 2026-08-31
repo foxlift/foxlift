@@ -41,6 +41,14 @@ foxlift decompile app.exe -o recovered
 
 `decompile` exits with `0` only when every discovered section was lifted inside the supported slice. Exit code `2` means partial output was written but could not be fully verified. Invalid or unsupported input exits with `1`.
 
+Extract an application into a named project tree:
+
+```console
+foxlift extract app.exe -o recovered
+```
+
+`extract` names every file from the container's own directory: compiled `.fxp` and `.mpx` members come back as `.prg` and `.mpr` source, form and class tables are reconstructed with their method source restored, and tables, memo sidecars, and raw resources are written byte-for-byte. The detected startup program is reported. Exit `0` means every entry landed; `2` means the tree was written with named misses.
+
 FoxLift works offline and does not require Visual FoxPro at runtime.
 
 A worked example ships in [demo/](demo/): authored source, compiled on a real VFP9, decompiled with this CLI, recompiled byte-identical — with every exit code, hash, and per-section verdict recorded in its receipts.
