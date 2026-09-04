@@ -21,13 +21,25 @@ def methods_bytes_from_objcode(code: bytes, codec: str | None = None) -> bytes:
     decode via the table mark to Unicode; r44-codepage measured they compile
     on ACP-936 as GBK source bytes, so a latin-1 encode miss falls back to
     GBK rather than dropping the record.
+
+    A record whose lifted source needs BOTH — a latin-1-carried binary payload
+    beside a CJK identifier — has no single encoding that carries it, and
+    there is nothing to write. That is a NAMED refusal like any other, not a
+    UnicodeEncodeError escaping into the caller: `reconstruct_table` records it
+    as a lift failure and leaves the record alone (r54-declarelib exposed it on
+    a record whose lift the same round unblocked).
     """
     m = container.parse(code, codec=codec)
     lines = lifter.lift_program(m)
     try:
         raw = codepage.prg_bytes(lines)
     except UnicodeEncodeError:
-        raw = ("\n".join(lines) + "\n").encode("gbk")
+        try:
+            raw = ("\n".join(lines) + "\n").encode("gbk")
+        except UnicodeEncodeError as exc:
+            raise lifter.Unsupported(
+                "METHODS source not encodable in one codepage (%s)"
+                % exc.reason) from None
     return raw.replace(b"\n", b"\r\n")
 
 

@@ -52,6 +52,41 @@ class Field:
     descriptor: bytes = field(default_factory=bytes)
 
 
+class MalformedTable(ValueError):
+    """A DBF header that is not self-consistent with the file holding it."""
+
+
+def header_bounds(blob: bytes) -> str | None:
+    """Why these bytes are not a self-consistent DBF header, or None.
+
+    A file can carry a table extension over something else entirely. Corpus 2
+    holds 87 such files, 39 of them .scx/.vcx: 284-byte XML documents whose
+    bytes 4..8 read as a record count of 1,819,113,535 and whose bytes 10..12
+    read as a record length of 29,285. A reader that trusts that header builds
+    a list of nearly two billion record slices; the freeze that first met one
+    spent 65 CPU-minutes on a single file with no end in sight.
+
+    Three conditions decide it: the header must fit inside the file, the record
+    length must be nonzero, and the records the header declares must fit after
+    the header. A file that fails any of them is refused BY NAME rather than
+    read as a table whose records all slice short — which is a table that
+    reports zero records and says nothing about why.
+    """
+    if len(blob) < 32:
+        return "shorter than a 32-byte DBF header"
+    n = int.from_bytes(blob[4:8], "little")
+    header_len = int.from_bytes(blob[8:10], "little")
+    record_len = int.from_bytes(blob[10:12], "little")
+    if header_len < 32 or header_len > len(blob):
+        return "header length %d against a %d-byte file" % (header_len, len(blob))
+    if record_len == 0:
+        return "record length 0"
+    if header_len + n * record_len > len(blob):
+        return ("declares %d records of %d bytes after a %d-byte header, but "
+                "the file is %d bytes" % (n, record_len, header_len, len(blob)))
+    return None
+
+
 def corpus_root() -> Path:
     return Path(os.environ.get(
         "FOXLIFT_CORPUS", "~/work/foxlift-root/foxlift-corpus"
@@ -107,6 +142,9 @@ class Table:
     def __init__(self, path: Path):
         self.path = path
         self.data = path.read_bytes()
+        why = header_bounds(self.data)
+        if why is not None:
+            raise MalformedTable("%s: %s" % (path, why))
         self.memo = self._open_memo()
 
         self.record_count = struct.unpack_from("<I", self.data, 4)[0]

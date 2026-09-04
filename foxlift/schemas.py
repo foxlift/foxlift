@@ -96,7 +96,9 @@ ON_PAGE_SELECTOR = 0xBE     # value collides with ENDTRY_LEAD; context-local
 RUN_LEAD = 0x43
 # ORACLE round-25 forced_rules[3] (c1 = `53`; corpus cboHierarchy s1 stmt[7]):
 # ZAP is a bare one-byte statement. r42-zapin: ZAP IN <alias> is
-# 53 16 f7 <u16> (AATest frstestharn s5[0] 5316f70000).
+# 53 16 f7 <u16> (AATest frstestharn s5[0] 5316f70000). r54-inalias: the alias
+# takes the same three spellings SET's 16 mark carries — bare symbol, work-area
+# number, or its own fc..fd group with the 03 runtime-paren postfix.
 ZAP_LEAD = 0x53
 # ORACLE CMD_SWEEP.md row RECALL (probes/oracle_harvest/CMD_SWEEP.md line 141:
 # authored source 'RECALL' compiled to bare `3a`); the round-30 followup carries
@@ -159,13 +161,23 @@ ENDTEXT_LEAD = 0x1F          # standalone frame sentinel closing a TEXT block
 TEXT_FLAG_TEXTMERGE = 0x60   # wire-ordered BEFORE NOSHOW even when source says otherwise (t4/t6)
 TEXT_FLAG_NOSHOW = 0xCE      # t3
 TEXT_FLAG_ADDITIVE = 0x01    # wire-AFTER NOSHOW though sources spell it first (t5/t6)
-TEXT_FLAG_PRETEXT = 0xC3     # round-37 C07/J1: third in the fixed order 60 -> ce -> c3,
-                             # followed by its numeric argument as fc f8 <digits> <u8>
-                             # ('PRETEXT 2' = fc f8 01 02); corpus twins aatest.scx
+TEXT_FLAG_PRETEXT = 0xC3     # round-37 C07/J1: in the fixed wire order 60 -> ce -> 01 ->
+                             # c3 -> c4, carrying an fc-wrapped EXPRESSION argument closed
+                             # by fd only when a clause follows and reader-stripped when
+                             # statement-final. round-62 r62-texthead re-measured: the
+                             # argument is any expression, not only a small int ('PRETEXT 2'
+                             # = c3 fc f8 01 02, 'PRETEXT "z"' = c3 fc d9 01 00 7a,
+                             # 'PRETEXT m.lnP' = c3 fc f5 0d f7..); corpus twins aatest.scx
                              # 'PRETEXT 14' = fc f8 02 0e, sstextbox.scx '{NOSHOW}
-                             # PRETEXT 1' = fc f8 01 01
+                             # PRETEXT 1' = fc f8 01 01, fxu.vcx 'NOSHOW PRETEXT 3 FLAGS 1'
+                             # = ce c3 fc f8 01 03 fd c4 fc f8 01 01
+TEXT_FLAG_FLAGS = 0xC4       # round-62 r62-texthead: the FLAGS nFlags clause, LAST in the
+                             # wire order (behind PRETEXT), same fc-wrapped-expression shape
+                             # ('FLAGS 1' = c4 fc f8 01 01)
 # 0xFB inside a TEXT frame = one verbatim body line, fb <u16 len excluding newline>
-# <bytes>; reuse of the STR literal token, context-local to the frame.
+# <bytes>; reuse of the STR literal token, context-local to the frame. Met at
+# STATEMENT level (a section that failed to lift for another reason), it is the
+# same verbatim line: dec_statement decodes it standalone (round-62 r62-textline).
 AS_CLAUSE_MARK = 0x51        # WITH ... AS <class> (round-23 w3; class uppercased on the
                              # wire) AND typed-LOCAL '<name> AS <type>' (same byte; also
                              # SQL alias / DECLARE alias slots elsewhere)
@@ -173,7 +185,13 @@ LOCAL_OF_MARK = 0xC3         # typed-LOCAL 'AS <type> OF <library>' (chartadjust
                              # Command3 stmt0, OF "..\class\FoxCharts.Vcx"; corpus
                              # alignment -- round-23 logged it as corroboration only,
                              # confirmed against the pair's own bytes+source)
-RETURN = 0x42      # 42 [fc expr fd]                              (f7_cal)
+RETURN = 0x42      # 42 [[04] fc expr fd]                        (f7_cal)
+RETURN_TO_MASTER_WORD = 0xBC  # r51-carriers: 'RETURN TO MASTER' is 42 28 bc —
+                     # the universal 28 TO mark with a WORD behind it instead of a
+                     # target. 'RETURN TO <prog>' puts an f7 symbol there instead.
+RETURN_BYREF = 0x04  # r50-sysapp: 'RETURN @<expr>' puts an 04 in front of the
+                     # group; no unmarked spelling produces one, so the two are
+                     # wire-distinguishable and the '@' is recoverable.
 DIM = 0x15         # 15 <name f6> fc <dim> fd [07 fc <dim> fd]* 03 (f8_arr/f8_ar2)
 WITH = 0xA6        # a6 fc <expr> fd f9 05 <u16 slot-word>        (f8_wit; word stable across runs)
 ENDWITH = 0xA7     # a7
@@ -248,6 +266,23 @@ DEFINE_WINDOW_KW = 0x2C   # DEFINE WINDOW ... (m1 replica byte-exact); also the
                           # s38[4]). WINDOWS / WINDOW w1 collapse to the same.
 DEFINE_POPUP_KW = 0xC6    # DEFINE POPUP / ACTIVATE POPUP object keyword
 DEFINE_BAR_KW = 0x06      # DEFINE BAR <n> OF <popup> (g3/g4)
+
+# CLEAR's operand bank under lead 0x0e — ONE keyword byte and nothing else,
+# swept whole on the oracle (r54-clearbank: every keyword VFP9's CLEAR accepts,
+# 25 programs). WINDOW and WINDOWS share 0x2c (r42-clear). CLEAR ECHO and a
+# bare CLEAR CLASSLIB are not in the language: VFP9 refuses both. The operands
+# that carry a payload keep their own arms and appear here for their BARE form
+# only — DLLS 0x56, RESOURCES 0xcc; CLASS 0x4f and CLASSLIB 0x52 have no bare
+# form at all and are absent.
+CLEAR_KEYWORDS = {
+    0x03: "ALL", 0x11: "FIELDS", 0x1A: "MACROS", 0x1B: "MEMORY",
+    0x1C: "MENUS", 0x22: "PROMPT", 0x2C: "WINDOW", 0x4B: "PROGRAM",
+    0x56: "DLLS", 0xC2: "GETS", 0xC6: "POPUPS", 0xC8: "READ",
+    0xCA: "DEBUG", 0xCC: "RESOURCES", 0xD4: "TYPEAHEAD", 0xD5: "EVENTS",
+}
+CLEAR_READ = 0xC8         # CLEAR READ ALL is READ's byte then ALL's own 0x03
+CLEAR_ALL = 0x03
+CLEAR_CLASSLIB = 0x52     # CLEAR CLASSLIB <name>, the name an fb/d9 literal
 DEFINE_PAD_KW = 0xBC      # DEFINE PAD <name> OF _MSYSMENU (r43-pad); 0xBC is
                           # FINALLY / ON PAD / ACTIVATE elsewhere — lead 0x73
                           # decides
@@ -336,6 +371,73 @@ BROWSE_LEAD = 0x09            # 09 2c f7<w> ... = BROWSE WINDOW (m5); collides w
 BROWSE_TITLE_MARK = 0x27      # 27 fc<TITLE>fd (m5)
 BROWSE_TIMEOUT_MARK = 0xCE    # ce fc<TIMEOUT>fd (m5); cross-binds round-15's WAIT
                               # TIMEOUT byte (TEXT_FLAG_NOSHOW is another namespace)
+BROWSE_FOR_MARK = 0x13        # 13 fc<FOR>fd (round-31 attendanceset frmWeixiu s1); the
+                              # same FOR-marker byte SCAN FOR / LOCATE FOR carry
+BROWSE_FIELDS_MARK = 0x11     # 11 <items joined by 07> (round-28 pricelistdetail
+                              # Command1 s0); COPY_LEAD's byte, context-local under 09
+BROWSE_WINDOW_MARK = 0x2C     # 2c f7<win> (m5); DEFINE_WINDOW_KW's byte
+
+# BROWSE's clause list, in the ONE canonical order the wire stores it in.
+# r53-browsehead measured the envelope over 45 authored programs: BROWSE has no
+# mandatory head, and every permutation of a clause set compiles to the SAME
+# frame — the source's order survives only in the section's symbol table, never
+# in the statement. So the reader walks this table once, in this order, and a
+# clause byte the table does not name keeps its refusal. The table holds only
+# clauses a measured law admits; it grows one law at a time.
+#
+# Each entry is (byte, operand kind, source word, BrowseWindow field):
+#   flag    = the byte alone, no operand
+#   group1  = fc <expr> [fd] — exactly one operand
+#   group2  = up to two operands, fc groups joined by ARGJOIN 07 (KEY's range)
+#   group3  = up to three (FONT's face, size, style)
+#   name    = f7 <u16>, or an fc <expr> 03 group when the source spelled ()
+#   litname = a name, or an un-grouped d9 / fb string literal (PREFERENCE only)
+#   valid   = VALID's own frame: [c6 = :F] fc <cond> [fd 10 fc <ERROR text>]
+#   fields  = the 11 item list, with its own attribute grammar
+# A groupN clause reads AT MOST n operands: r53-browseval authored every arity
+# the language accepts for KEY and FONT, and a longer list is a shape no
+# carrier shows, so it keeps its refusal.
+# A clause with a field name is one of the five round 24/28/31 gave
+# `BrowseWindow` an attribute for; the rest are carried in `clauses`, in this
+# order, and emitted by the word recorded here. NOEDIT's `c5` is also
+# NOMODIFY's: the wire records the clause, never which word was written
+# (r53-browseflag), so the emitter writes one of them.
+BROWSE_CLAUSES = (
+    (0xC7, "flag", "NOFOLLOW", None),
+    (0xC6, "flag", "NOCAPTIONS", None),
+    (0xC2, "flag", "LAST", None),
+    # PREFERENCE shares LAST's position: VFP9 refuses to write the pair, so no
+    # frame ranks them and `_dec_browse` refuses a frame that carries both
+    (0xD1, "litname", "PREFERENCE", None),
+    (0x30, "flag", "NOOPTIMIZE", None),
+    (BROWSE_FOR_MARK, "group1", "FOR", "for_cond"),
+    (BROWSE_FIELDS_MARK, "fields", "FIELDS", "fields"),
+    (0x40, "group3", "FONT", None),
+    (0x19, "group1", "LOCK", None),
+    (0xC0, "name", "FREEZE", None),
+    (0xCA, "flag", "NOMENU", None),
+    (0xC1, "flag", "NOAPPEND", None),
+    (0xD4, "group1", "WIDTH", None),
+    (0xC5, "flag", "NOEDIT", None),
+    (0xC4, "flag", "NODELETE", None),
+    (0xD0, "flag", "NOCLEAR", None),
+    (0x14, "flag", "FORMAT", None),
+    (BROWSE_WINDOW_MARK, "name", "WINDOW", "window"),
+    (0x3A, "flag", "NOWAIT", None),
+    (0x25, "flag", "SAVE", None),
+    (0xD6, "flag", "NORMAL", None),
+    (0x17, "group2", "KEY", None),
+    (BROWSE_TITLE_MARK, "group1", "TITLE", "title"),
+    (BROWSE_TIMEOUT_MARK, "group1", "TIMEOUT", "timeout"),
+    (0x16, "name", "IN WINDOW", None),
+    (0xBD, "flag", "NOLINK", None),
+    (0x50, "flag", "NOLGRID", None),
+    (0xCD, "flag", "NORGRID", None),
+    (0xD5, "group1", "PARTITION", None),
+    (0xD2, "group1", "WHEN", None),
+    (0x2A, "valid", "VALID", None),
+    (0xC3, "flag", "NOREFRESH", None),
+)
 PARAM_OF_MARK = 0xC3          # typed parameter 'As Class Of library': c3 fb<lib>
                               # verbatim (round-24 l1); byte collides with C3_ORDER /
                               # DEFINE_BAR_OF — position under lead af/34 decides
@@ -352,6 +454,13 @@ CREATE_CURSOR_LEAD = 0x68     # 68 {bd|31} fb<name> 02 <fields> 03 (round-26 c1/
                               # 0xBD = CREATE CURSOR; 0x31 = CREATE TABLE (round-42
                               # clause batch). DISCOVERY: the NAME occupies SYMBOL
                               # SLOT 0 ahead of field names though carried as an fb string.
+                              # r75-fromarray: FROM ARRAY is 15 04 <array> after the
+                              # name (and after optional FREE c0 / CODEPAGE ba), with
+                              # no field list.
+CREATE_FROM_MARK = 0x15       # FROM under lead 0x68 (r75-fromarray). Same byte as
+                              # the universal FROM_MARK; position under 68 decides.
+CREATE_ARRAY_MARK = 0x04      # ARRAY after FROM under lead 0x68 (r75-fromarray).
+                              # Same byte as CALC_TO_ARRAY_MARK / SQL INTO ARRAY.
 INSERT_LEAD = 0x72            # 72 bc <target-group> 15 c2 =
                               # INSERT INTO (<expr>) FROM MEMVAR (round-26 i1)
 SQL_INTOTABLE_MARK = (0xBC, 0x31)  # INTO TABLE (<expr>) vs INTO CURSOR bc bd
@@ -378,80 +487,270 @@ SET_LEAD = 0x47      # 47 <setting-id> [clauses]. FORCED subset only:
                      # Setting ids are yet another per-command namespace; unforced
                      # variants stay Unsupported until aligned (probe queued).
 PUBLIC_LEAD = 0x37   # 37 <name-list> mirrors LOCAL grammar (ARGJOIN names)
-# SET setting names — Guineu SetToken enum, restricted to settings whose ON/OFF
-# form is valid VFP (numeric/TO-valued settings stay Unsupported until forced).
-# Landed oracle id-space sweep (HARVEST.md "SET-command id space — MEASURED,
-# 43/43 forms") adds CONFIRM 09 / CONSOLE 0a / FIXED 1b / MULTILOCKS 5f.
-# COMPATIBLE 41 and ASSERTS 85 are CORPUS ALIGNMENTS, not rows of that sweep:
-#   41 <-> 'SET COMPATIBLE OFF'/'SET COMPATIBLE ON' (oaasstant.scx::Form1 s6 —
-#          statements [1]/[2] sit exactly on those two source lines — and
-#          vfp_skins.vcx::sysmenupop, whose only SET lines are COMPATIBLE);
-#   85 <-> 'SET ASSERTS ON' (foxcharts.vcx::foxcharts s48, 2/2).
-# TEXTMERGE 60 is a CORPUS ALIGNMENT too: 'SET TEXTMERGE ON'/'OFF' are the ONLY
-# SET lines of 0d6f165ca4ec5020/1e14aeb167c60c8b/49a46e7871d5025f, which fail
-# exactly on '47 60 1f'/'47 60 20' (plus the ON-NOSHOW/TO-MEMVAR forms below).
-SET_ONOFF_NAMES = {
-    0x02: "BELL",       0x09: "CONFIRM",     0x0A: "CONSOLE",     # landed sweep
-    0x0F: "DELETED",     0x15: "ESCAPE",     # ESCAPE corpus-aligned
-    0x16: "EXACT",      0x17: "EXCLUSIVE",   0x1B: "FIXED",
-    0x2E: "SAFETY",
-    0x30: "STATUS",     0x31: "STEP",        0x32: "TALK",
-    0x41: "COMPATIBLE",                      # corpus alignment (see above)
-    0x54: "RESOURCE",                        # HARVEST 43/43; r42 I9 ON/OFF
-    0x5A: "NOTIFY",     0x5F: "MULTILOCKS",
-    0x60: "TEXTMERGE",                       # corpus alignment (see above)
-    0x83: "SYSFORMATS",  0x85: "ASSERTS",    # ASSERTS corpus-aligned (see above)
-    0x86: "COVERAGE",
-    0x88: "NULLDISPLAY",
-}
-# Bare-TO settings: '47 <id> 28' with no operand. FILTER/PROCEDURE aligned in iter. 29;
-# 0x05 CENTURY bare-TO aligned to stored source 'SET CENTURY TO'
-# (oaremotionweb.scx::rtx Init, 1/1; its ON/OFF forms were already measured).
-# DECIMALS 0d bare-TO: '47 0d 28' <-> stored source 'SET DECIMALS TO'
-# (5 methods incl. corpus .scx forms, e.g. 10e6d810ae3b4e19:0 stmt0) — the
-# VALUE form of the same id keeps its own round-25 branch below. INDEX 21
-# bare-TO: landed sweep identity (INDEX 21), observed '47 21 28' x2
-# (foxcharts.vcx::foxcharts s82 twin pair). MESSAGE 26 / ORDER 28 / KEY 79 /
-# DEBUGOUT 8a bare-TO: corpus-aligned ids (provenance at SET_VALUE_TO_NAMES)
-# whose bare spellings are measured ('SET MESSAGE TO', 'SET ORDER TO',
-# 'SET KEY TO', 'SET DEBUGOUT TO'); TEXTMERGE 60 bare-TO likewise.
-# RELATION 2d bare-TO: '47 2d 28' <-> stored source 'SET RELATION TO'
-# (xfrxlib.vcx::xfcont s66 stmt30, the relation-clearing form); the id itself is
-# already measured by the INTO-bearing SET RELATION arm on its own carrier.
-SET_BARE_TO_NAMES = {0x1A: "FILTER", 0x2B: "PROCEDURE", 0x05: "CENTURY",
-                     0x0D: "DECIMALS", 0x21: "INDEX", 0x26: "MESSAGE",
-                     0x28: "ORDER", 0x2D: "RELATION", 0x60: "TEXTMERGE",
-                     0x79: "KEY", 0x8A: "DEBUGOUT"}
+# r50-leadsweep — the file-verb bank, one construct per program, frames read
+# off the compile. Each verb's clause bytes are the estate-wide ones: 28 TO,
+# 15 FROM, 03 the ALL scope, 18 LIKE / bc EXCEPT.
+TYPE_LEAD = 0x4F         # TYPE [TO PRINTER] <file>
+COMPILE_LEAD = 0x83      # COMPILE [DATABASE] <name>
+RUNSCRIPT_LEAD = 0x92    # RUNSCRIPT <file>
+LOAD_LEAD = 0x2C         # LOAD <module>
+CALL_LEAD = 0x0A         # CALL <module>
+PLAY_LEAD = 0x81         # PLAY MACRO <name>
+BUILD_LEAD = 0x8F        # BUILD <kind> <name> FROM <source>
+SAVE_LEAD = 0x44         # SAVE [kind] TO <file> [ALL LIKE|EXCEPT <skel>]
+RESTORE_LEAD = 0x40      # RESTORE [kind] FROM <file> [ADDITIVE]
+GETEXPR_LEAD = 0x82      # GETEXPR [<prompt>] TO <var> [TYPE <c>] [DEFAULT <e>]
+PRINTER_KW = 0x21        # the PRINTER word REPORT FORM's own TO clause carries
+DATABASE_KW = 0xC2       # COMPILE DATABASE; the same c2 CLOSE DATABASES spends
+MACROS_KW = 0x1A         # SAVE/RESTORE/PLAY MACROS
+FROM_MARK = 0x15         # the universal FROM clause (APPEND FROM, RESTORE FROM)
+RESTORE_ADDITIVE = 0x01  # RESTORE FROM <f> ADDITIVE
+GETEXPR_TYPE_MARK = 0xD4
+GETEXPR_DEFAULT_MARK = 0x0E
+# r51-carriers: DLL and MTDLL join the bank; both carry the EXE frame byte
+# for byte, and RECOMPILE appends BUILD_RECOMPILE_WORD to any of them.
+BUILD_KINDS = {0xC5: "PROJECT", 0xBD: "APP", 0xBE: "EXE",
+               0xC6: "DLL", 0xC8: "MTDLL"}
+BUILD_RECOMPILE_WORD = 0xCB
+SAVE_RESTORE_KINDS = {0x1A: "MACROS", 0x26: "SCREEN", 0x2C: "WINDOW"}
+ALL_QUALIFIERS = {0x18: "LIKE", 0xBC: "EXCEPT"}
 
-# ---- SET value-form grammar (population lane SET, offline-forced) ------------
-# Measured wire: '47 <id> 28 fc <expr> [03] [fd] [01]' where the trailing
-# runtime-paren marker 03 is the PAREN postfix INSIDE the value group
-# ('(m.x)' values), fd is reader-stripped when statement-final, and 01 =
-# ADDITIVE. Anchor: vfp_skins.vcx::sysmenupop s0 stmt10
-#   '47 7e 28 fc f4 02 00 f7 06 00 03 fd 01'
-#   <-> 'SET CLASSLIB TO (THIS.CLASSLIBRARY) ADDITIVE'.
-# Ids from the LANDED oracle sweep: DEFAULT 0e · ORDER 28 · PATH 29 ·
-# PROCEDURE 2b · POINT 3b · LIBRARY 62 (+ADDITIVE per HARVEST.md) · BELL 02.
-# Ids from CORPUS ALIGNMENT (bytecode vs own stored METHODS): CLASSLIB 7e
-# (vfp_skins/foxchartsbeta/excelxml et al.), MEMOWIDTH 24 ('SET MEMOWIDTH TO
-# 1024', oaasstant.scx::Form1 s6 stmt5 — value int16 1024), MESSAGE 26
-# ('SET MESSAGE TO …' x10 carriers incl. GBK prompt strings and bare TO),
-# DEBUGOUT 8a ('SET DEBUGOUT TO "Debug.txt"' / bare TO, excelxml.vcx s17/s109).
-SET_VALUE_TO_NAMES = {
-    0x02: "BELL",       0x0E: "DEFAULT",     0x1A: "FILTER",
-    0x24: "MEMOWIDTH",  0x26: "MESSAGE",     0x28: "ORDER",
-    0x29: "PATH",       0x2B: "PROCEDURE",   0x3B: "POINT",
-    0x54: "RESOURCE",   # r42-setres: 47 54 28 fc <expr> [03]; ON/OFF is 47 54 1f/20
-    0x62: "LIBRARY",    0x79: "KEY",         0x7E: "CLASSLIB",
-    0x8A: "DEBUGOUT",
+UPDATE_SQL_LEAD = 0x70   # r50-leadsweep: UPDATE <t> [FROM <s>] SET <c> = <e> …
+SQL_DELETE_LEAD = 0x71   # r52-sqldelete: DELETE FROM <target> [WHERE <cond>].
+                         # The target is a bare fb name or its own fc..fd
+                         # group with the 03 runtime-paren postfix; the
+                         # condition rides one group behind the c6 WHERE mark.
+                         # The xbase DELETE is lead 0x14, a different verb.
+
+# The xbase DELETE's record-scope bank — ORACLE-MEASURED r54-inalias (41
+# programs). The wire order under lead 0x14 is
+#   14 [16 <alias>] [30] [<scope>] [13 fc <for>] [2b fc <while>]
+# and the source spells it the other way round:
+#   DELETE [<scope>] [FOR <c>] [WHILE <c>] [IN <alias>] [NOOPTIMIZE]
+# NEXT and RECORD carry their count in an fc-group; ALL and REST are bare. The
+# scope byte for ALL is the same 03 REPLACE spends, and NEXT's 1e and FOR's 13
+# are the estate-wide clause bytes.
+DELETE_SCOPE_WORDS = {0x03: "ALL", 0x24: "REST", 0x1E: "NEXT",
+                      0x23: "RECORD"}
+DELETE_SCOPE_COUNTED = {"NEXT", "RECORD"}
+DELETE_WHILE_MARK = 0x2B      # WHILE <cond>, its own fc-group
+DELETE_NOOPTIMIZE = 0x30      # NOOPTIMIZE, wired in FRONT of the scope word
+
+DROP_LEAD = 0x6A         # DROP TABLE 31 / DROP VIEW c4
+SQL_SET_MARK = 0xCA      # the SET mark; the same ca INDEX TAG spends
+SQL_WHERE_MARK = 0xC6    # the WHERE mark SELECT-SQL's own WHERE carries
+DROP_KINDS = {0x31: "TABLE", 0xC4: "VIEW"}
+
+# r50-leadsweep — the data-command bank. Each verb's clause bytes are the
+# estate-wide ones: 28 TO, 15 FROM, 20 ON, 13 FOR, d1 WITH, 11 FIELDS, 14 FORM,
+# 2c WINDOW, 06 BAR, d4 TYPE.
+EXPORT_LEAD = 0x56       # EXPORT TO <file> [FIELDS <list>] TYPE <word>
+# EXPORT's own type bank: the shared APPEND FROM / COPY TO words this
+# compiler also accepts here, plus DIF, which r50-leadsweep measured on
+# EXPORT alone. It is kept separate from FILE_TYPE_WORDS so no reading can
+# hand APPEND FROM a word only EXPORT was measured with — and so the SDF
+# row, which VFP9 refuses on EXPORT, cannot leak in from the shared bank.
+EXPORT_TYPE_WORDS = {0xC7: "XLS", 0xBB: "XL5", 0xBD: "FOXPLUS",
+                     0xBE: "DELIMITED", 0xBF: "DIF"}
+DOCK_LEAD = 0xBF         # DOCK WINDOW <w> POSITION <n>
+DOCK_POSITION_KW = 0x64  # the POSITION word; the bare-number and AT
+                         # forms are refused by this VFP9
+ACCEPT_LEAD = 0x05       # ACCEPT ["prompt"] TO <var>
+INPUT_LEAD = 0x27        # INPUT  ["prompt"] TO <var>
+FIND_LEAD = 0x22         # FIND <literal text>
+LABEL_LEAD = 0x2A        # LABEL FORM <name>
+IMPORT_LEAD = 0x57       # IMPORT FROM <file> TYPE <word>
+JOIN_LEAD = 0x29         # JOIN WITH <alias> TO <file> FOR <cond>
+SORT_LEAD = 0x49         # SORT [FIELDS <list>] ON <key>[ /D] TO <file>
+TOTAL_LEAD = 0x4E        # TOTAL ON <key> TO <file>
+MENU_LEAD = 0x5D         # MENU BAR <array>, <n>
+SCROLL_LEAD = 0x60       # SCROLL <r1>, <c1>, <r2>, <c2>, <n>
+SIZE_LEAD = 0x89         # SIZE WINDOW <w> TO <rows>, <cols>
+PRINTEEE = 0x79          # ??? <expr> — the raw-output sibling of ? and ??
+BACKSLASH2_LEAD = 0x8E   # '\\ <text>' — the no-line-feed sibling of 0x8d
+FIELDS_MARK = 0x11       # the FIELDS list mark COPY TO and SCATTER carry
+ON_MARK = 0x20           # the ON mark INDEX ON / SORT ON / TOTAL ON share
+FOR_MARK = 0x13          # the FOR mark LOCATE and SCAN spend
+FORM_MARK = 0x14         # the FORM mark REPORT FORM and DO FORM carry
+BAR_MARK = 0x06          # the BAR mark DEFINE BAR spends
+TYPE_WORD_MARK = 0xD4    # the optional TYPE keyword (r47-typeword)
+# REPORT FORM clause bank — ORACLE-MEASURED r69-bank. Flag clauses are a
+# bare mark; RANGE / FOR / WHILE / HEADING / NEXT / RECORD / TO FILE /
+# OBJECT / NAME carry an operand. ASCII (c3) rides AHEAD of the 28 TO
+# mark. PREVIEW immediately followed by TO is a VFP9 syntax error; the
+# corpus PREVIEW-then-TO wire is the compiler moving PREVIEW in front of
+# a source TO. IN is 16 (PREVIEW IN w and PREVIEW IN WINDOW w share one
+# frame); WINDOW without IN is 2c.
+REPORT_FILE_KW = 0x12
+REPORT_PROMPT_KW = 0x22
+REPORT_OBJECT_KW = 0x2E
+REPORT_PLAIN = 0x3B
+REPORT_NOWAIT = 0x3A
+REPORT_NOCONSOLE = 0x39
+REPORT_NAME_KW = 0x4A
+REPORT_NODIALOG = 0x65
+REPORT_OFF = 0x1F
+REPORT_PREVIEW = 0xC1
+REPORT_ASCII = 0xC3
+REPORT_NOEJECT = 0xC4
+REPORT_RANGE = 0xC7
+REPORT_SUMMARY = 0xCE
+REPORT_PDSETUP = 0xD0
+REPORT_NOPAGEEJECT = 0xD5
+REPORT_NORESET = 0xD6
+REPORT_ENVIRONMENT = 0xBD
+REPORT_HEADING = 0xBF
+REPORT_FLAG_CLAUSES = {
+    0xBD: "ENVIRONMENT", 0xC4: "NOEJECT", 0x30: "NOOPTIMIZE",
+    0xD0: "PDSETUP", 0x3B: "PLAIN", 0xC1: "PREVIEW", 0x3A: "NOWAIT",
+    0xC3: "ASCII", 0x39: "NOCONSOLE", 0xD6: "NORESET",
+    0xD5: "NOPAGEEJECT", 0xCE: "SUMMARY", 0x65: "NODIALOG",
+    0x1F: "OFF",
 }
-# ADDITIVE (trailing 01) measured ONLY on these ids: PATH/PROCEDURE/LIBRARY/
-# CLASSLIB ('SET PATH TO … ADDITIVE', 'SET PROCEDURE TO xfrx ADDITIVE',
-# HARVEST.md 'ADDITIVE appends trailing 01'). A trailing 01 behind any other
-# id stays Unsupported. KEY value form: 'SET KEY TO (lii+1)' xfrxlib s15.
-SET_ADDITIVE_IDS = frozenset({0x29, 0x2B, 0x62, 0x7E})
+REPORT_SCOPE_WORDS = {0x03: "ALL", 0x24: "REST", 0x1E: "NEXT",
+                      0x23: "RECORD"}
+REPORT_SCOPE_COUNTED = {"NEXT", "RECORD"}
+
+TRANSACTION_KW = 0xBD    # r50-leadsweep: the keyword byte BEGIN/END TRANSACTION
+                         # spend; VFP has no bare BEGIN or END statement.
+PRINTJOB_LEAD = 0x76     # r50-leadsweep: PRINTJOB f9 05 <u16> … ENDPRINTJOB 77
+ENDPRINTJOB_LEAD = 0x77
+HIDDEN_LEAD = 0x9F   # r50-leadsweep: HIDDEN <prop>[, ...] in class-init —
+                     # the same frame PROTECTED's 0xa1 carries.
+IMPLEMENTS_LEAD = 0xB9  # r50-leadsweep: IMPLEMENTS <iface> IN <library>,
+                     # the library behind the same 0x16 IN mark FOR EACH uses.
+# SET's ON/OFF id bank — ORACLE-MEASURED r52-setonoff, one program per SET
+# command name across the whole VFP9 namespace, each carrying that name's ON
+# line and its OFF line and nothing else. 111 names compiled: 61 produce the
+# toggle shape `47 <id> 20` / `47 <id> 1f`, 47 have no ON/OFF form in this
+# language at all (VFP9 refuses them, so no artifact can carry one), and three
+# — DATE, ENGINEBEHAVIOR, REPORTBEHAVIOR — compile ON and OFF into their own
+# value slots instead and are NOT toggles.
+#
+# The bank is injective across every name, and every id the table already held
+# from the landed sweep and the corpus alignments lands on the same byte, which
+# is what makes the sweep a bank rather than a list.
+#
+# COVERAGE 86 and NULLDISPLAY 88 are carried from the landed HARVEST sweep:
+# this VFP9 refuses their ON/OFF spelling, so r52-setonoff could not reach
+# them, and narrowing an envelope on a form this matrix cannot address would
+# be a regression rather than a measurement.
+SET_ONOFF_NAMES = {
+    0x01: "ALTERNATE", 0x02: "BELL", 0x03: "CARRY", 0x05: "CENTURY",
+    0x06: "CLEAR", 0x07: "COLOR", 0x09: "CONFIRM", 0x0A: "CONSOLE",
+    0x0C: "DEBUG", 0x0F: "DELETED", 0x10: "DELIMITERS", 0x12: "DOHISTORY",
+    0x13: "ECHO", 0x15: "ESCAPE", 0x16: "EXACT", 0x17: "EXCLUSIVE",
+    0x18: "FIELDS", 0x1B: "FIXED", 0x1E: "HEADINGS", 0x1F: "HELP",
+    0x22: "INTENSITY", 0x26: "MESSAGE", 0x2A: "PRINTER", 0x2E: "SAFETY",
+    0x30: "STATUS", 0x31: "STEP", 0x32: "TALK", 0x36: "UNIQUE",
+    0x37: "VIEW", 0x3E: "CLOCK", 0x40: "SPACE", 0x41: "COMPATIBLE",
+    0x42: "AUTOSAVE", 0x45: "DEVELOPMENT", 0x46: "NEAR", 0x49: "LOCK",
+    0x51: "FULLPATH", 0x53: "MOUSE", 0x54: "RESOURCE", 0x57: "LOGERRORS",
+    0x58: "STICKY", 0x59: "SYSMENU", 0x5A: "NOTIFY", 0x5B: "BRSTATUS",
+    0x5D: "CURSOR", 0x5E: "UDFPARMS", 0x5F: "MULTILOCKS",
+    0x60: "TEXTMERGE", 0x61: "OPTIMIZE", 0x64: "ANSI", 0x65: "TRBETWEEN",
+    0x68: "KEYCOMP", 0x69: "PALETTE", 0x77: "NULL", 0x7B: "CPDIALOG",
+    0x7D: "SECONDS", 0x83: "SYSFORMATS", 0x84: "OLEOBJECT",
+    0x85: "ASSERTS", 0x87: "EVENTTRACKING", 0x8F: "AUTOINCERROR",
+    0x86: "COVERAGE",                       # landed HARVEST sweep (see above)
+    0x88: "NULLDISPLAY",                    # landed HARVEST sweep (see above)
+}
+# Bare-TO settings: '47 <id> 28' with no operand — ORACLE-MEASURED
+# r52-setvalue, one program per SET command name spelling `SET <name> TO` and
+# nothing else. 49 names compile to exactly three bytes; the rest either have
+# no TO form at all or spend an operand even when the source writes none
+# (PATH and TOPIC store an EMPTY fb name, `47 29 28 fb 0000`).
+SET_BARE_TO_NAMES = {
+    0x01: "ALTERNATE", 0x02: "BELL", 0x03: "CARRY", 0x05: "CENTURY",
+    0x07: "COLOR", 0x0D: "DECIMALS", 0x0E: "DEFAULT", 0x12: "DOHISTORY",
+    0x18: "FIELDS", 0x1A: "FILTER", 0x1C: "FORMAT", 0x1F: "HELP",
+    0x21: "INDEX", 0x26: "MESSAGE", 0x27: "ODOMETER", 0x28: "ORDER",
+    0x2A: "PRINTER", 0x2B: "PROCEDURE", 0x2D: "RELATION", 0x38: "CURRENCY",
+    0x39: "HOURS", 0x3A: "MARK", 0x3B: "POINT", 0x3C: "SEPARATOR",
+    0x3D: "BORDER", 0x3E: "CLOCK", 0x4E: "SKIP", 0x53: "MOUSE",
+    0x54: "RESOURCE", 0x59: "SYSMENU", 0x5C: "MACKEY", 0x60: "TEXTMERGE",
+    0x62: "LIBRARY", 0x63: "HELPFILTER", 0x66: "PDSETUP",
+    0x6D: "NOCPTRANS", 0x79: "KEY", 0x7C: "CPCOMPILE", 0x7E: "CLASSLIB",
+    0x7F: "DATABASE", 0x80: "DATASESSION", 0x81: "FDOW", 0x82: "FWEEK",
+    0x86: "COVERAGE", 0x87: "EVENTTRACKING", 0x88: "NULLDISPLAY",
+    0x89: "EVENTLIST", 0x8A: "DEBUGOUT", 0x91: "TABLEVALIDATE",
+}
+
+# ---- SET's value-TO id bank — ORACLE-MEASURED r52-setvalue ------------------
+# One program per SET command name for each of three operand spellings: the
+# bare `TO`, the `TO zz` unquoted name, and the `TO (m.a)` group. 60 names
+# carry a value behind the `28` TO mark, the id space is injective, and every
+# name that also has an ON/OFF form lands on the SAME byte in both sweeps —
+# the agreement between the two halves is what makes this a bank.
+#
+# Wire: '47 <id> 28 <operand> [01]' where the operand is one of the three
+# spellings dec_set_value reads — an fc..fd group (the 03 runtime-paren
+# postfix rides INSIDE it for '(m.x)' values, and fd is reader-stripped when
+# statement-final), a BARE fb name, or a bare f7 symbol on the five ids the
+# sweep measured it on — and a trailing 01 is ADDITIVE.
+#
+# Which spelling a name takes is a property of the SETTING: 22 name-valued
+# settings store `TO zz` as a bare fb name, 32 expression-valued ones compile
+# it to a group, and CARRY / EVENTLIST / FIELDS / NOCPTRANS / SKIP take a bare
+# symbol. RELATION is absent on purpose — this VFP9 refuses `SET RELATION TO
+# zz` outright (the INTO clause is required), so only its bare TO and its own
+# INTO-bearing arm exist. Ids with a dedicated arm earlier in the chain
+# (FILTER's IN tail, ORDER's, SYSMENU's pad list, PRINTER's keywords,
+# TEXTMERGE's, DATE's word, DATASESSION's) reach this table only for the
+# shapes those arms do not claim.
+SET_VALUE_TO_NAMES = {
+    0x01: "ALTERNATE", 0x02: "BELL", 0x03: "CARRY", 0x05: "CENTURY",
+    0x07: "COLOR", 0x0B: "DATE", 0x0D: "DECIMALS", 0x0E: "DEFAULT",
+    0x10: "DELIMITERS", 0x12: "DOHISTORY", 0x18: "FIELDS", 0x1A: "FILTER",
+    0x1C: "FORMAT", 0x1F: "HELP", 0x21: "INDEX", 0x23: "MARGIN",
+    0x24: "MEMOWIDTH", 0x26: "MESSAGE", 0x27: "ODOMETER", 0x28: "ORDER",
+    0x29: "PATH", 0x2A: "PRINTER", 0x2B: "PROCEDURE", 0x35: "TYPEAHEAD",
+    0x37: "VIEW", 0x38: "CURRENCY", 0x39: "HOURS", 0x3A: "MARK",
+    0x3B: "POINT", 0x3C: "SEPARATOR", 0x3D: "BORDER", 0x3E: "CLOCK",
+    0x43: "BLOCKSIZE", 0x48: "REFRESH", 0x4D: "REPROCESS", 0x4E: "SKIP",
+    0x53: "MOUSE", 0x54: "RESOURCE", 0x55: "TOPIC", 0x59: "SYSMENU",
+    0x5C: "MACKEY", 0x60: "TEXTMERGE", 0x62: "LIBRARY", 0x63: "HELPFILTER",
+    0x66: "PDSETUP", 0x6B: "COLLATE", 0x6D: "NOCPTRANS", 0x79: "KEY",
+    0x7C: "CPCOMPILE", 0x7E: "CLASSLIB", 0x7F: "DATABASE",
+    0x80: "DATASESSION", 0x81: "FDOW", 0x82: "FWEEK", 0x86: "COVERAGE",
+    0x87: "EVENTTRACKING", 0x88: "NULLDISPLAY", 0x89: "EVENTLIST",
+    0x8A: "DEBUGOUT", 0x91: "TABLEVALIDATE",
+}
+# The five ids whose `TO <name>` operand is a BARE f7 symbol rather than a
+# group or an fb name (r52-setvalue). A bare symbol behind any other id was
+# never produced by this compiler and stays refused.
+SET_SYMBOL_VALUE_IDS = {0x03: "CARRY", 0x18: "FIELDS", 0x4E: "SKIP",
+                        0x6D: "NOCPTRANS", 0x89: "EVENTLIST"}
+
+# The 22 ids whose `TO <name>` operand is a BARE fb name (r52-setvalue). For
+# every other id in the bank this compiler groups an unquoted operand, so a
+# bare fb behind one of them was never produced and stays refused.
+SET_NAME_VALUE_IDS = {
+    0x01: "ALTERNATE", 0x0B: "DATE", 0x0E: "DEFAULT", 0x12: "DOHISTORY",
+    0x1C: "FORMAT", 0x1F: "HELP", 0x21: "INDEX", 0x28: "ORDER",
+    0x29: "PATH", 0x2A: "PRINTER", 0x2B: "PROCEDURE", 0x37: "VIEW",
+    0x54: "RESOURCE", 0x55: "TOPIC", 0x5C: "MACKEY", 0x60: "TEXTMERGE",
+    0x62: "LIBRARY", 0x7E: "CLASSLIB", 0x7F: "DATABASE", 0x86: "COVERAGE",
+    0x87: "EVENTTRACKING", 0x8A: "DEBUGOUT",
+}
+
+# MACKEY's operand is a macro KEY LABEL, not a value: `SET MACKEY TO (m.a)`
+# compiles to '47 5c 28 fc 43 00 …', a chain that is not an expression group,
+# and reading it as one emits a line VFP9 recompiles differently. The bare
+# name spelling round-trips, so the id keeps its place in the bank and only
+# its GROUPED operand stays refused (r52-setvalue, referee-verified).
+SET_NAME_ONLY_IDS = frozenset({0x5C})
+# ADDITIVE (trailing 01) on PATH/PROCEDURE/LIBRARY/CLASSLIB (r52) and on
+# ALTERNATE/PRINTER/COVERAGE (r71-additive). TEXTMERGE TO-file and TO MEMVAR
+# also spend it. A trailing 01 behind any other id stays Unsupported.
+SET_ADDITIVE_IDS = frozenset({0x01, 0x29, 0x2A, 0x2B, 0x62, 0x7E, 0x86})
 SET_ADDITIVE_MARK = 0x01   # clause byte 'ADDITIVE' (CMD_SWEEP: same byte as
                            # RESTORE FROM ADDITIVE)
+# SET CLASSLIB clause marks — ORACLE-MEASURED r71-classlib. After the TO
+# value(s): 02 is ALIAS (bare symbol or grouped), 16 is IN (bare fb name or
+# grouped), 07 joins extra libraries, 01 is ADDITIVE last. Source order is
+# IN then ALIAS then ADDITIVE; the wire stores ALIAS ahead of IN.
+SET_CLASSLIB_ALIAS_MARK = 0x02
 SET_NOSHOW_MARK = 0xCE     # TEXTMERGE ON NOSHOW tail ('47 60 20 ce' x9)
 
 # SET TEXTMERGE (corpus alignment _reportlistener.vcx::htmllistener s0):
@@ -477,6 +776,39 @@ SET_TEXTMERGE_DELIMITERS_MARK = 0xBE
 # 'SET ORDER TO 0 IN FRX'; alias slot may be an fc-group. Emission puts the
 # value before ' IN <alias>' per the stored spelling.
 SET_ORDER_IN_MARK = 0x16
+# SET ORDER direction — ORACLE-MEASURED r71-order. A leftover byte behind a
+# finished TO-value: 3c is DESCENDING, bd is ASCENDING. Same byte values as
+# SEPARATOR's setting id and NOTIFY CURSOR's mark, different slot. TAG is a
+# source word that leaves no mark (TO t1 and TO TAG t1 are one frame).
+SET_ORDER_DESCENDING_MARK = 0x3C
+SET_ORDER_ASCENDING_MARK = 0xBD
+
+# SET's `IN <alias>` tail — ORACLE-MEASURED r52-setin (30 programs). The `16`
+# IN mark carries the work area FIRST, before the setting's own value, and the
+# alias is a bare f7 symbol, a bare numeric literal, or its own fc..fd group
+# taking the 03 runtime-paren postfix exactly when the source parenthesises it.
+# What differs per setting is where the 28 TO mark sits:
+#   FILTER / KEY spend it in FRONT of the IN mark
+#     '47 1a 28 16 f7 <tt>'                 <-> SET FILTER TO IN tt
+#     '47 1a 28 16 fc f5 0d f7 <a> 03'      <-> SET FILTER TO IN (m.a)
+#     '47 1a 28 16 f9 01 0100'              <-> SET FILTER TO IN 1
+#     '47 1a 28 16 f7 <tt> fc <expr>'       <-> SET FILTER TO <expr> IN tt
+#     '47 79 28 16 f7 <tt> fc f8 0101'      <-> SET KEY TO 1 IN tt
+#   ORDER / RELATION spend it BEHIND the alias
+#     '47 28 16 f7 <tt> 28 fb "0"'          <-> SET ORDER TO 0 IN tt
+#     '47 2d 16 f7 <tt> 28 fc <e> fd bc f7 <tt>'
+#                                    <-> SET RELATION TO <e> INTO tt IN tt
+#     '47 2d 16 f7 <tt> 1f bc f7 <tt>'
+#                                    <-> SET RELATION OFF INTO tt IN tt
+#     '47 2d 01 16 f7 <tt> 28 fc <e> fd bc f7 <tt>'
+#                                    <-> SET RELATION TO <e> INTO tt ADDITIVE
+#                                       IN tt  (r71-relation: ADDITIVE's 01
+#                                       sits ahead of IN; source order of
+#                                       ADDITIVE vs IN is one frame)
+# The value group's closer is reader-stripped at statement end. INDEX, FIELDS
+# and SKIP were measured in the same matrix and this compiler drops their IN
+# clause without a trace, so no 16 can reach them.
+SET_IN_TAIL_TO_FIRST = {0x1A: "FILTER", 0x79: "KEY"}
 
 # SET PRINTER (excelxml.vcx s10, 3/3 alignment): '47 2a 28 0e' <->
 # 'SET PRINTER TO DEFAULT'; '47 2a 28 4a fc <expr>' <-> 'SET PRINTER TO NAME
@@ -484,11 +816,21 @@ SET_ORDER_IN_MARK = 0x16
 SET_PRINTER_ID = 0x2A
 SET_PRINTER_DEFAULT_MARK = 0x0E
 SET_PRINTER_NAME_MARK = 0x4A
+# r71-small: SET PRINTER ON PROMPT / OFF PROMPT appends DEVICE's PROMPT
+# mark 22 behind the ON/OFF toggle (`47 2a 20 22` / `47 2a 1f 22`).
+SET_REPROCESS_ID = 0x4D
+# r71-small: SET REPROCESS TO AUTOMATIC is `47 4d 28 bc`. SECONDS is a
+# trailing d1 behind a numeric TO-value (`47 4d 28 fc <n> fd d1`). AUTOMATIC
+# plus SECONDS is the same frame as AUTOMATIC alone.
+SET_REPROCESS_AUTOMATIC_MARK = 0xBC
+SET_REPROCESS_SECONDS_MARK = 0xD1
 
 # SET REPORTBEHAVIOR (corpus alignment foxchartsbeta/scx carriers + oaasstant,
 # 19 stmts): '47 93 fc <expr>' <-> 'SET REPORTBEHAVIOR 80|90' — NO TO marker;
-# the value group follows the id directly.
+# the value group follows the id directly. r52-setword measured ENGINEBEHAVIOR
+# on the same frame under id 90, byte for byte behind the id.
 SET_REPORTBEHAVIOR_ID = 0x93
+SET_NO_TO_VALUE_IDS = {0x90: "ENGINEBEHAVIOR", 0x93: "REPORTBEHAVIOR"}
 
 # NOTIFY CURSOR sub-keyword (fxmemberdatascript.vcx s22/s23): '47 5a bd 20|1f'
 # <-> 'SET NOTIFY CURSOR ON|OFF'; plain NOTIFY ON/OFF keeps the generic path.
@@ -536,6 +878,23 @@ SET_SYSMENU_PAD_IDS = {
     0x39: "_MEDIT",
 }
 
+# SET's word-valued settings — ORACLE-MEASURED r52-setword. Five settings
+# store a WORD where the rest of the namespace stores a toggle or a value:
+#   DATE   '47 0b fb <word>'      SET DATE ANSI      (no TO mark at all; a
+#                                                     second word leaves no
+#                                                     trace, as in ANSI LONG)
+#   DEVICE '47 11 28 <kw>'        SET DEVICE TO SCREEN | PRINTER [PROMPT]
+#          '47 11 28 12 <name>'   SET DEVICE TO FILE <name>
+#   ENGINEBEHAVIOR '47 90 fc <v>' the frame REPORTBEHAVIOR's 93 already carries
+#   STATUS '47 30'                SET STATUS TO      (the TO mark is dropped)
+#          '47 30 06 20 | 1f'     SET STATUS BAR ON | OFF (06 is the BAR mark)
+#   TEXTMERGE DELIMITERS with no TO is the delimiters mark alone, '47 60 be'.
+SET_DEVICE_ID = 0x11
+SET_DEVICE_WORDS = {0x12: "FILE", 0x21: "PRINTER", 0x26: "SCREEN"}
+SET_DEVICE_PROMPT_MARK = 0x22
+SET_STATUS_ID = 0x30
+SET_STATUS_BAR_MARK = 0x06
+
 # SET DATE setting id: '47 0b 28 fb <str>' <-> stored source
 # 'SET DATE TO ANSI LONG' (oaremotionweb.scx::rtx Init). The compiler keeps only the
 # first value word as an fb string literal — the trailing LONG leaves NO bytecode trace,
@@ -559,6 +918,11 @@ SET_DATE_ID = 0x0B
 SET_OF_BAR_NAMES = {0x4E: "SKIP", 0x3A: "MARK"}
 SET_OF_MARK = 0xC3    # 'OF' keyword byte inside the SKIP/MARK clause chain
 SET_BAR_MARK = 0x06   # 'BAR' keyword byte behind the first OF
+# The four objects the OF chain names — ORACLE-MEASURED r52-setof. BAR names
+# its bar with its own fc..fd group and takes an owner behind a second `c3`;
+# PAD does the same with a bare symbol; MENU and POPUP take one operand and no
+# owner. A system menu rides `ec <id>` in either slot.
+SET_OF_OBJECT_WORDS = {0x06: "BAR", 0x1C: "MENU", 0xBC: "PAD", 0xC6: "POPUP"}
 # The value slot may carry the source's own TO word as a 28 in front of its
 # group — measured on MARK only, both directions, in the SAME method:
 #   frxpreview.vcx::frxpreviewform s10 stmt43 '…03 fd 28 fc 2d'
@@ -642,6 +1006,32 @@ USE_ALIAS_MARK = 0x02     # ALIAS clause marker AFTER the name; measured operand
 # NOTE: bc before the name stays EXCLUSIVE (iter. 36) and the SAME byte after the name
 # reads AGAIN — each reading forced by its own stored source line (fxlistener s38:
 # 'USE (THIS.CommandClauses.File) AGAIN SHARED NOUPDATE ALIAS FRX').
+CALC_LEAD = 0x7D     # 7d 28 <targets> (<sel> 02 [<fc expr fd> [07 …]] 03)*:
+                     # CALCULATE <fn>(e)[, …] TO v[, …]. Items and TO targets
+                     # both joined by ARGJOIN 07 (round59_calcitems oracle sweep).
+CALC_ITEM_GROUP_OPEN = 0x02   # opens one CALCULATE item's argument group
+CALC_ITEM_GROUP_CLOSE = 0x03  # closes it; a no-argument item (CNT) is 02 03
+# The aggregate-function selector byte under lead 7d, one per function, a
+# contiguous bc..c3 block in ALPHABETICAL name order (round59_calcitems sweep:
+# every documented CALCULATE function compiled, one item each). CONTEXT-LOCAL to
+# lead 7d — bf/c2/c3 carry other meanings under 3c/5e/1b and must never be
+# promoted into a global byte map.
+CALC_ITEM_FN = {0xBC: "AVG", 0xBD: "CNT", 0xBE: "MAX", 0xBF: "MIN",
+                0xC0: "NPV", 0xC1: "STD", 0xC2: "SUM", 0xC3: "VAR"}
+# Every CALCULATE clause rides AHEAD of the 28 TO mark, in one fixed frame order
+# whatever order the source spelled it (round59_calcclause oracle sweep):
+#   16 <operand>   IN            30      NOOPTIMIZE
+#   <scope word>   03 ALL / 24 REST bare; 1e NEXT / 23 RECORD + fc <count> fd
+#   13 fc <cond> fd   FOR         2b fc <cond> fd   WHILE
+# then 28, and `28 04 <lvalue>` is TO ARRAY. CONTEXT-LOCAL to lead 7d: 13/2b/16
+# are the FOR/WHILE/IN marks other leads spend, 03/04/24/23/1e/30 are not tokens.
+CALC_SCOPE_WORDS = {0x03: "ALL", 0x24: "REST"}          # bare, no operand
+CALC_SCOPE_COUNTED = {0x1E: "NEXT", 0x23: "RECORD"}     # word + fc <count> fd
+CALC_FOR_MARK = 0x13
+CALC_WHILE_MARK = 0x2B
+CALC_TO_ARRAY_MARK = 0x04   # 28 04 <lvalue>: TO ARRAY <name>
+CALC_NOOPTIMIZE = 0x30
+CALC_IN_MARK = 0x16
 SUM_LEAD = 0x4B      # 4b 28 <lv> fc <expr>: SUM <field> TO <memvar>
                      # forced by mainmenu1::GrdList 'SUM totalquan TO a'
 COUNT_LEAD = 0x12    # 12 28 f7 <sym>: COUNT TO var (TOKEN_REFERENCE §leads);
@@ -671,22 +1061,47 @@ LOCATE_LEAD = 0x2D   # 2d 13 fc <rpn-to-end>: LOCATE FOR <cond> — no closing f
                      # Variants whose RPN ends mid-operator stay Unsupported.
 USE_LEAD = 0x51     # bare USE statement (forced: source 'USE' after TABLEREVERT
                     # sequences); operand forms unforced
-SCATTER_LEAD = 0x5E # round-17 oracle-measured forms (probes/oracle_harvest/
-                    # round17_streams.json): 5e 28 f7 <arr> = SCATTER TO <array>;
-                    # 5e 1b c2 = SCATTER MEMVAR MEMO. Round-42 I8 exact-length
-                    # extras (round42_scatter_streams.json): 5e 1b 4a f7 <sym>
-                    # = SCATTER MEMO NAME <bare>; 5e 08 1b 4a f7 <sym> =
-                    # SCATTER MEMO BLANK NAME <bare>. Every other 5e shape stays
-                    # Unsupported. Selector bytes are CONTEXTUAL beneath this lead,
-                    # never global tokens (the bare-67=VAL / ea-67=SQLDISCONNECT
-                    # collision class; HARVEST.md round-17). The TO selector byte is
-                    # the pre-existing TO_MARK — ONE name per byte on this path.
-SCATTER_MEMVAR_MARK = 0x1B  # MEMVAR clause under leads 5e/5f context
-                            # (collides with ELSE_LEAD / ALIAS closer elsewhere)
-SCATTER_MEMO_MARK = 0xC2    # MEMO clause under lead 5e context (collides with
-                            # USE SHARED / PUTFILE closer / OPEN-DATABASE marker)
-GATHER_LEAD = 0x5F   # sole round-17-measured form: 5f 15 f7 <arr> = GATHER FROM
-                     # <array>; any other 5f shape stays Unsupported.
+SCATTER_LEAD = 0x5E # SCATTER's destination bank, oracle-measured across rounds
+                    # 17/28/42/58 (round58_destbank_streams.json). Wire grammar:
+                    # 5e [08=BLANK] [1b=MEMO] <destination>, the two modifiers in
+                    # a fixed 08-then-1b order that does NOT depend on source
+                    # spelling. Destinations: c2 = MEMVAR (SCATTER MEMVAR = 5e c2),
+                    # 28 f7 <arr> = TO <array>, 4a <operand> = NAME <object>. So
+                    # 5e 1b c2 is MEMO(1b) then MEMVAR(c2) = SCATTER MEMVAR MEMO,
+                    # and MEMO/BLANK never stand without a destination (VFP9 rejects
+                    # SCATTER MEMO / SCATTER BLANK). Selector bytes are CONTEXTUAL
+                    # beneath this lead, never global tokens (bare-67=VAL /
+                    # ea-67=SQLDISCONNECT class; HARVEST.md round-17). The TO
+                    # selector is the pre-existing TO_MARK — ONE name per byte.
+SCATTER_MEMVAR_MARK = 0xC2  # MEMVAR destination under leads 5e/5f (r58-destbank:
+                            # SCATTER MEMVAR = 5e c2, GATHER MEMVAR = 5f c2). The
+                            # byte collides with USE SHARED / PUTFILE closer /
+                            # OPEN-DATABASE marker elsewhere — contextual.
+SCATTER_MEMO_MARK = 0x1B    # MEMO modifier under leads 5e/5f, stored BEFORE the
+                            # destination (r58-destbank: 5e 1b c2 = SCATTER MEMVAR
+                            # MEMO). Collides with ELSE_LEAD / ALIAS closer.
+SCATTER_BLANK_MARK = 0x08   # BLANK modifier under lead 5e only, stored before MEMO
+                            # (r58-destbank: 5e 08 c2 = SCATTER BLANK MEMVAR).
+                            # GATHER rejects BLANK.
+SCATTER_NAME_MARK = 0x4A    # NAME <object> destination under leads 5e/5f, the
+                            # operand read by _name_operand (round-28 W4)
+SCATTER_ADDITIVE_MARK = 0x01  # ADDITIVE on SCATTER's NAME destination and that
+                            # destination ONLY (r58-additive: VFP9 rejects it on
+                            # TO, on MEMVAR, on both GATHER destinations and with
+                            # no destination). It sits directly after the NAME
+                            # operand and BEFORE any FIELDS clause:
+                            # 5e 4a f7<o> 01 [11 <fields>].
+SCATTER_FIELDS_LIKE = 0x18  # LIKE qualifier after the 11 FIELDS mark
+                            # (r49-menusweep, re-measured r58-fieldlist)
+SCATTER_FIELDS_EXCEPT = 0xBC  # EXCEPT qualifier after the 11 FIELDS mark. Both
+                            # qualifiers may appear, LIKE first then EXCEPT:
+                            # r58-fieldlist measured 5e c2 11 18 <str> bc <str>
+                            # for 'SCATTER FIELDS LIKE a EXCEPT b MEMVAR'.
+GATHER_LEAD = 0x5F   # GATHER's destination bank (round17/28/58): 5f [1b=MEMO]
+                     # <destination>, destination one of c2 = MEMVAR (GATHER
+                     # MEMVAR = 5f c2), 15 f7 <arr> = FROM <array>, 4a <operand>
+                     # = NAME <object>. BLANK is a SCATTER-only modifier and does
+                     # not compile here.
 GATHER_FROM_MARK = 0x15     # FROM clause under lead 5f only (collides with DIM
                             # lead and SQL FROM — contextual, not global)
 ERROR_LEAD = 0xA8    # a8 fc <expr> [fd 07 fc <expr>]* : ERROR <expr>[, ...] —
@@ -759,19 +1174,48 @@ SQLSEL_JOIN_MARK = 0xD2   # JOIN table follows this byte (r42-tiera3).
 SQLSEL_JOIN_INNER = 0xD4  # INNER JOIN and bare JOIN are this byte; LEFT 58, RIGHT 59.
 SQLSEL_JOIN_LEFT = 0x58
 SQLSEL_JOIN_RIGHT = 0x59
-SQLSEL_JOIN_ON = 0x20     # ON <expr> after the joined table/alias.
+SQLSEL_JOIN_FULL = 0xD3   # FULL JOIN / FULL OUTER JOIN (r74-join). OUTER is not on the wire.
+SQLSEL_JOIN_ON = 0x20     # ON <expr> after the joined table/alias, or after a nested JOIN chain.
 SQLSEL_FROM_ALIAS = 0x51  # FROM t alias uses the same 51 f7 <u16> as column AS.
 SQLSEL_INTOCURSOR_MARK = (0xBC, 0xBD)
 SQLSEL_NOFILTER_MARK = 0xCD  # trailing NOFILTER tag, the slot READWRITE (d7) also
                              # occupies; VFP spells them as alternatives on one
                              # INTO CURSOR. Round-40 lane F, oracle-measured and
                              # carried by two stored-source corpus pairs
+# The whole trailing tail bank behind a SQL SELECT — ORACLE-MEASURED
+# r54-selnointo. NOCONSOLE is 39 and NOWAIT 3a, and the compiler normalises the
+# SOURCE order to the wire order NOWAIT-then-NOCONSOLE, so both spellings of
+# the pair are ONE frame. The words ride a destination-bearing statement and a
+# destination-less one alike. Combinations with READWRITE or NOFILTER have no
+# oracle row and are not admitted: the tail is matched whole.
+SQLSEL_TAILS = {
+    (): (),
+    (0xD7,): ("READWRITE",),
+    (0xCD,): ("NOFILTER",),
+    (0x39,): ("NOCONSOLE",),
+    (0x3A,): ("NOWAIT",),
+    (0x3A, 0x39): ("NOWAIT", "NOCONSOLE"),
+}
+# The SQL SUBQUERY operand — ORACLE-MEASURED r54-subquery (20 programs). The
+# opcode carries the block's own byte LENGTH, so a reader knows where it ends
+# without parsing it: `e8 <u16 n> <n bytes>`. The n bytes are `00` and then a
+# SELECT BODY with no 6f lead of its own — the 15 FROM mark, its table in
+# either the bare-name or the grouped spelling, and a projection that is c7 for
+# the star or the ordinary fc <col> fd column units. Inside the block every
+# group closes, because the block's own length ends it rather than the
+# statement. What APPLIES the block is an ordinary expression operator behind
+# it: an `ea` pair for the SQL-only ones, or a plain comparison byte.
+SQL_SUBQUERY = 0xE8
+SQL_SUBQUERY_LEAD_BYTE = 0x00   # the block's first byte, fixed in every row
+SQL_SUBQUERY_OPS = {0xF8: "IN", 0xF9: "EXISTS"}
+# r63-sqlop: ANY/SOME share f6, ALL is f7. They wrap the subquery and a
+# comparison byte follows (`id = ANY (SELECT …)` is `e8 … ea f6 10`).
+SQL_SUBQUERY_QUANT = {0xF6: "ANY", 0xF7: "ALL"}
 C3_ORDER = 0xC3       # ORDER-BY section marker in SQL-SELECT (Guineu-clause consistent)
-SQL_UNION_SUBLEAD = 0xC4  # second byte of the UNION-form SQL SELECT (6f c4 ...);
-                          # measured on 5 corpus statements, every source a
-                          # UNION ALL of two arms emitted in reverse order
-SQL_UNION_CONST = (0x03, 0xE8)  # fixed u16 pair following the c4 sublead in all
-                          # 5 measured instances; meaning unmeasured — opaque
+SQL_UNION_SUBLEAD = 0xC4  # second byte of the UNION-form SQL SELECT (6f c4 …)
+SQL_UNION_ALL_MARK = 0x03  # optional ALL after c4; absent is plain UNION (r74-union)
+SQL_UNION_LEN_MARK = 0xE8  # then a u24; not a sum-of-names gate (r74-union)
+SQL_UNION_CONST = (0x03, 0xE8)  # ALL + length marker; ALL is optional (r74-union)
 SQL_DISTINCT_MARK = 0xBE  # SELECT DISTINCT: 6f be 15 … [bc bd INTO]
                           # (r42-seldistinct). Per-arm DISTINCT under UNION
                           # (6f c4) is the same mark. No-INTO DISTINCT is
@@ -882,10 +1326,41 @@ SYSTEM_OBJECT_REFS = {0x39: "_SCREEN", 0x43: "_VFP"}
 # id -> (min args, max args).
 MEASURED_LOCAL_GROUP_CLOSERS = {
     0x6B: (1, 1),
+    0x53: (0, 2),   # RLOCK — r63-rlock: RLOCK() / RLOCK(alias) /
+                    # RLOCK(alias, n) compile (`43 53`, `43 STR 53`,
+                    # `43 STR f8 53`); 3 args too-many. NOT RLOCK() is
+                    # the 0x0a postfix on the same closer. Registry arity
+                    # stays "?"; name from BARE_IDS.
+    0x2C: (0, 0),   # ERROR — r73-error: ERROR() compiles (`43 2c`);
+                    # ERROR(n) is too-many. ERROR() = n is the 0x10
+                    # comparison behind the same closer (`43 2c f8 02 18
+                    # 10`, `43 2c f9 04 80 04 10`). Registry arity stays
+                    # "?"; name from BARE_IDS.
+    0x73: (0, 1),   # POPUPS — r73-popups: POPUPS() / POPUPS(name) compile
+                    # (`43 73`, `43 STR 73`); 2 args too-many. NOT POPUPS()
+                    # is the 0x0a postfix. Registry arity stays "?"; name
+                    # from BARE_IDS.
+    0x22: (0, 0),   # COL — r73-col: COL() compiles (`43 22`); COL(n)
+                    # too-many. Registry arity stays "?"; name from BARE_IDS.
+    0x4C: (0, 0),   # PROW — r73-tail: PROW() compiles (`43 4c`); PROW(n)
+                    # too-many. Corpus `43 4c f8 01 01 06` is PROW() + 1.
+    0x4B: (0, 0),   # PCOL — r73-tail: PCOL() compiles (`43 4b`); PCOL(n)
+                    # too-many. Unmasked when PROW closed.
+    0x84: (0, 0),   # PRINTSTATUS — r73-tail: PRINTSTATUS() compiles (`43 84`).
+    0x3F: (0, 2),   # LOCK — r73-tail: LOCK() / LOCK(alias) / LOCK(alias, n).
+    0x28: (0, 2),   # DISKSPACE — r73-tail: DISKSPACE() / DISKSPACE(vol) /
+                    # DISKSPACE(vol, n).
+    0x87: (0, 0),   # VARREAD — r73-tail: VARREAD() compiles (`43 87`).
+    0x42: (0, 1),   # LUPDATE — r73-tail: LUPDATE() / LUPDATE(alias);
+                    # 2 args too-many.
     0x1F: (1, 1),
-    0x6D: (1, 1),
-    0x81: (2, 2),
-    0x82: (1, 1),
+    0x6D: (0, 3),   # KEY — r63-arity: KEY() / KEY(n) / KEY(n, alias) /
+                    # KEY(n, alias, n) compile; 4 args unmeasured.
+    0x81: (2, 3),   # MLINE — r63-arity: MLINE(s) too-few; MLINE(s, n) and
+                    # MLINE(s, n, start) compile; 4 args too-many.
+    0x82: (0, 2),   # ORDER — r63-arity: ORDER() / ORDER(alias) /
+                    # ORDER(alias, n) compile; 3 args too-many. The corpus
+                    # 0-arg form is ORDER() with an empty 43-group.
     0x90: (1, 2),
     0xB3: (1, 2),
     0xBD: (1, 1),
@@ -907,12 +1382,9 @@ MEASURED_LOCAL_GROUP_CLOSERS = {
     0x85: (0, 1),   # PROMPT — r43-prompt: 'x = PROMPT()' -> 43 85;
                     # 'x = PROMPT(1)' -> 43 f8 1 85. Statement lead 0x85 is
                     # ENDFOR; expression closer is PROMPT. Two args unmeasured.
-    0x9F: (1, 1),   # r36-sim V-CLOSER-9F: RELATION — oracle id
-                    # function_ids.json relation=bare 9f (arity "?"); corpus
-                    # argument histogram {1:2} over decoder-reached closer
-                    # positions (/tmp/foxlift-r35-impl-closers census), both
-                    # sightings stored-source aligned. Name read from the
-                    # generated registry at point of use.
+    0x9F: (1, 2),   # RELATION — r36 mined (1,1); r63-arity widens: RELATION()
+                    # too-few, RELATION(n) and RELATION(n, alias) compile,
+                    # 3 args too-many. Name from the generated registry.
     0x9B: (1, 26),  # ALLTRIM — r44-arity compile_dir (vmlock r44-arity):
                     # ALLTRIM() too-few; ALLTRIM(c) through 26 args compile;
                     # 27 args too-many. function_ids.json arity stays "?".
@@ -938,6 +1410,9 @@ MEASURED_EA_GROUP_CLOSERS = {
     0x11: (2, 6),  # ASCAN — r44-arity: ASCAN() / ASCAN(a) too-few;
                    # ASCAN(a, e) through six args compile; seven too-many.
                    # function_ids.json arity stays "?".
+    0xEC: (1, 2),  # QUARTER — r73-tail: QUARTER(date) / QUARTER(date, n);
+                   # QUARTER() too-few. `ea ec`. Bare opcode 0xec is a
+                   # different class.
 }
 if not set(MEASURED_EA_GROUP_CLOSERS) <= BUILTIN_ESCAPES.keys():
     raise AssertionError("ea-arity closer missing from measured registry")
@@ -992,26 +1467,41 @@ SYSVAR_READ = 0xED
 #                  value must never mirror registry namespaces in the same byte
 #                  (BARE_IDS[0x39]=ISALPHA, EA_IDS[0x39]=CPCONVERT; pinned in
 #                  tests/test_round27_sysobj.py).
+#   0x3E _ASCIICOLS, 0x3F _ASCIIROWS — round-40 lane H oracle probe f29
+#   ('_ASCIICOLS = 80' / '_ASCIIROWS = 63' -> 54ed3e10fcf80250 / 54ed3f10fcf8023f),
+#   both rows RAW-EQUAL to _reports.vcx::_output #85/#86.
+#   0x42 _COVERAGE — round-42 E1 oracle `qq = _COVERAGE`; AATest
+#   b3a24153c66ca99a sections 0/1/2 carry the same id.
+# r54-sysvars IS the fresh probe those rounds were waiting for. Every documented
+# VFP9 system-variable name was compiled as `q = <name>`, 81 programs, none
+# refused: 78 names ride `ed <id>` and the ids below are exactly what the oracle
+# spelled, every previously-mapped id confirmed unchanged and none contradicted.
+# `_MERGE` and `_PDPARMS` compile as ordinary memory-variable reads — VFP9 has no
+# such system variables — which is what makes the sweep self-verifying: no row of
+# it rests on a compile that failed. The gaps (0x2c-0x2e, 0x4a-0x4c, 0x4f-0x51,
+# 0x53) are ids no name in the language reaches and they stay unmapped.
 SYSTEM_VARS = {
-    0x05: "_PAGENO",
-    0x1D: "_CLIPTEXT",
-    0x20: "_TALLY",
-    0x32: "_DOS",
-    0x33: "_MAC",
-    0x34: "_UNIX",
-    0x39: "_SCREEN",
-    0x47: "_GENHTML",
-    0x57: "_REPORTOUTPUT",
-    #   0x3E _ASCIICOLS, 0x3F _ASCIIROWS — round-40 lane H oracle probe f29
-    #   ('_ASCIICOLS = 80' / '_ASCIIROWS = 63' -> 54ed3e10fcf80250 /
-    #   54ed3f10fcf8023f), both rows RAW-EQUAL to _reports.vcx::_output #85/#86.
-    #   The same probe also emitted _PADVANCE = ed 04; that id is recorded in
-    #   the streams file but stays UNBOUND — no carrier needs it here.
-    0x3E: "_ASCIICOLS",
-    0x3F: "_ASCIIROWS",
-    # round-42 E1: oracle `qq = _COVERAGE` -> ed 42; AATest b3a24153c66ca99a
-    # sections 0/1/2 carry the same id (probes/oracle_harvest/round42_where03_*).
-    0x42: "_COVERAGE",
+    0x00: "_ALIGNMENT", 0x01: "_BOX", 0x02: "_INDENT", 0x03: "_LMARGIN",
+    0x04: "_PADVANCE", 0x05: "_PAGENO", 0x06: "_PBPAGE", 0x07: "_PCOLNO",
+    0x08: "_PCOPIES", 0x09: "_PDRIVER", 0x0A: "_PECODE", 0x0B: "_PEJECT",
+    0x0C: "_PEPAGE", 0x0D: "_PFORM", 0x0E: "_PLENGTH", 0x0F: "_PLINENO",
+    0x10: "_PLOFFSET", 0x11: "_PPITCH", 0x12: "_PQUALITY", 0x13: "_PSCODE",
+    0x14: "_PSPACING", 0x15: "_PWAIT", 0x16: "_RMARGIN", 0x17: "_TABS",
+    0x18: "_WRAP", 0x19: "_DBLCLICK", 0x1A: "_CALCVALUE", 0x1B: "_CALCMEM",
+    0x1C: "_DIARYDATE", 0x1D: "_CLIPTEXT", 0x1E: "_TEXT", 0x1F: "_PRETEXT",
+    0x20: "_TALLY", 0x21: "_CUROBJ", 0x22: "_MLINE", 0x23: "_THROTTLE",
+    0x24: "_GENMENU", 0x25: "_GENSCRN", 0x26: "_GENGRAPH", 0x27: "_GENPD",
+    0x28: "_PDSETUP", 0x29: "_GENXTAB", 0x2A: "_FOXDOC", 0x2B: "_FOXGRAPH",
+    0x2F: "_STARTUP", 0x30: "_TRANSPORT", 0x31: "_BEAUTIFY", 0x32: "_DOS",
+    0x33: "_MAC", 0x34: "_UNIX", 0x35: "_WINDOWS", 0x36: "_SPELLCHK",
+    0x37: "_SHELL", 0x38: "_ASSIST", 0x39: "_SCREEN", 0x3A: "_BUILDER",
+    0x3B: "_CONVERTER", 0x3C: "_WIZARD", 0x3D: "_TRIGGERLEVEL",
+    0x3E: "_ASCIICOLS", 0x3F: "_ASCIIROWS", 0x40: "_BROWSER",
+    0x41: "_SCCTEXT", 0x42: "_COVERAGE", 0x43: "_VFP", 0x44: "_GALLERY",
+    0x45: "_GETEXPR", 0x46: "_INCLUDE", 0x47: "_GENHTML",
+    0x48: "_RUNACTIVEDOC", 0x49: "_SAMPLES", 0x4D: "_FOXCODE",
+    0x4E: "_FOXTASK", 0x52: "_FOXREF", 0x54: "_TASKPANE",
+    0x55: "_REPORTBUILDER", 0x56: "_REPORTPREVIEW", 0x57: "_REPORTOUTPUT",
 }
 WORKAREA_REF = 0xF5 # f5 <id>: 0D = memory-variable reference (m.<name>, next token MUST
                      # be f7 <sym>; forced 235/235 against stored sources); 01-0A = the
@@ -1132,6 +1622,37 @@ POPUP_IN_MARK = 0x16         # IN <name>: 16 f7 <u16>. Byte doubles as GO_IN_CLA
 #   the comma is OPTIONAL (`KEY CTRL+A` -> 17 fb<key>, no 07 group).
 BAR_STYLE_MARK = 0x41        # STYLE fc<expr>fd (e02/e03/e04/e11)
 BAR_MESSAGE_MARK = 0x1D      # MESSAGE fc<expr>fd (e05/e11; round-37 w_b09 `MESS ""`)
+
+# DEFINE POPUP's clause list, in the ONE canonical order the wire stores it in
+# (r53-popuphead: every permutation of a clause set is the same frame). Round
+# 40 read the order off carriers that spelled COLOR SCHEME, SHADOW and MARGIN
+# with no FROM list and placed those three in FRONT of one; the wire stores
+# them behind it. Each entry is (byte, operand kind, source word):
+#   flag   = the byte alone
+#   group  = fc <expr> [fd]
+#   pair   = two fc groups joined by ARGJOIN (FROM's and TO's coordinates)
+#   prompt = 22 <sub-op>: 11 FIELD <expr>, 12 FILES, cc STRUCTURE
+#   name   = f7 <u16>, or an fc <expr> 03 paren group
+#   scheme = the two-byte WIN_SCHEME_MARK then its group
+# KEY `17` is measured (an un-grouped fb literal, somewhere between SHADOW and
+# SHORTCUT) but the span could not rank it, so it is deliberately absent.
+DEFINE_POPUP_CLAUSES = (
+    (DEFINE_FROM_MARK, "pair", "FROM"),
+    (0x28, "pair", "TO"),
+    (BAR_PROMPT_MARK, "prompt", "PROMPT"),
+    (BAR_MESSAGE_MARK, "group", "MESSAGE"),
+    (DEFINE_WIN_TITLE, "group", "TITLE"),
+    (WIN_SCHEME_MARK[0], "scheme", "COLOR SCHEME"),
+    (POPUP_SHADOW_MARK, "flag", "SHADOW"),
+    (POPUP_MARGIN_MARK, "flag", "MARGIN"),
+    (POPUP_IN_MARK, "name", "IN"),
+    (POPUP_RELATIVE_MARK, "flag", "RELATIVE"),
+    (0xD5, "flag", "MULTISELECT"),
+    (0xC0, "group", "FOOTER"),
+    (0xCE, "flag", "SCROLL"),
+    (0xBD, "flag", "MOVER"),
+    (POPUP_SHORTCUT_MARK, "flag", "SHORTCUT"),
+)
 BAR_KEY_MARK = 0x17          # KEY fb<key-text> [07 fc<label>fd] (round-37 D6, e07).
                              # Byte doubles as ON_SELECTOR_KEY_LABEL under lead 31.
 #

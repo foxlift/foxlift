@@ -235,17 +235,33 @@ def _method_names(buf: bytes, start: int, stop: int) -> list[str]:
     return names
 
 
-def class_identities(buf: bytes, off: int = 0,
-                     end: int | None = None) -> list[ClassIdentity]:
-    """Read DEFINE CLASS identities from the post-section directory. No VM."""
-    if end is None:
-        end = len(buf)
+def _class_init_window(secs: list, nclass: int, footer: bool) -> list:
+    """The class-init sections, one per class, in class order.
+
+    r57-classinit: every DEFINE CLASS spends exactly one class-init section and
+    they are the LAST ``nclass`` sections of the module, counting EMPTY ones. A
+    class with no methods and no PEM assignments has nothing to put in its
+    class-init, so that section is empty — it is still spent and still sits in
+    class order. Taking the last ``nclass`` NON-EMPTY sections instead slides
+    the window one section earlier for each empty class-init, into the member
+    bodies.
+
+    ``footer`` says the class directory was reachable only BEFORE the last
+    section, which is exactly what makes that section the FXP footer phantom
+    r46-classinit named rather than a class-init.
+    """
+    tail = secs[:-1] if (footer and secs) else secs
+    return tail[-nclass:] if len(tail) >= nclass else []
+
+
+def _class_records(buf: bytes, off: int, end: int):
+    """(module, class records, class-init sections) or (None, [], [])."""
     try:
         mod = parse(buf, off)
     except ValueError:
-        return []
+        return None, [], []
     if not mod.sections:
-        return []
+        return None, [], []
 
     def _read_recs(anchor) -> list:
         pos = _skip_symbol_table(buf, anchor.end + 2, end)
@@ -277,17 +293,40 @@ def class_identities(buf: bytes, off: int = 0,
     # yielded no records, retry at the last nonempty section (class-init).
     # A real empty class section still has the directory after it — the
     # first try succeeds (mixed top-level + empty class).
+    footer = False
     if not recs and mod.sections[-1].is_empty and nonempty:
         recs = _read_recs(nonempty[-1])
+        footer = bool(recs)
+    if not recs:
+        return mod, [], []
+    inits = _class_init_window(mod.sections, len(recs), footer)
+    if not inits:
+        inits = nonempty[-len(recs):] if nonempty else []
+    return mod, recs, inits
+
+
+def class_init_offsets(buf: bytes, off: int = 0,
+                       end: int | None = None) -> list[int]:
+    """Offsets of the class-init sections, one per class, in class order."""
+    if end is None:
+        end = len(buf)
+    _mod, _recs, inits = _class_records(buf, off, end)
+    return [s.offset for s in inits]
+
+
+def class_identities(buf: bytes, off: int = 0,
+                     end: int | None = None) -> list[ClassIdentity]:
+    """Read DEFINE CLASS identities from the post-section directory. No VM."""
+    if end is None:
+        end = len(buf)
+    mod, recs, inits = _class_records(buf, off, end)
     if not recs:
         return []
     # Method names sit in one directory immediately before the first
     # class-init section. Each 0xa2/0xa3/0x9e INT32 is a 1-based index
     # into that list (public / PROTECTED / HIDDEN). Names not referenced
     # by any index are leftover module-level procedures, not class members.
-    nclass = len(recs)
     secs = mod.sections
-    inits = nonempty[-nclass:] if len(nonempty) >= nclass else nonempty
     if inits:
         first_init = inits[0]
         prev = None
@@ -356,17 +395,22 @@ def procedure_names(buf: bytes, off: int = 0,
 
 def procedure_directory(buf: bytes, off: int = 0,
                         end: int | None = None) -> list[tuple[str, int]]:
-    """(name, section offset - PROLOGUE_BASE) for a record whose directory the
-    last-section scan cannot reach.
+    """(name, section offset - PROLOGUE_BASE) — the module's own name binding.
 
-    r48-nonames: a form record's OBJCODE can end on an EMPTY footer section, so
-    :func:`procedure_names` — which scans from after the LAST section — starts
-    past the directory and reports none. The directory is the same r43-G3
-    ``<u16 nlen> <name> <u32 offset> <u16 0> <u16 0xffff>`` shape, sitting after
-    the last NON-EMPTY section's symbol table, the position
-    :func:`class_identities` already retries around. Its u32 is the section's
-    own offset minus the module prologue, so the name BINDS to a section rather
-    than pairing by position (exact on both carriers, 12/12 and 9/9 entries).
+    The directory is the r43-G3 ``<u16 nlen> <name> <u32 offset> <u16 0>
+    <u16 0xffff>`` run, and its u32 is the section's own offset minus the module
+    prologue, so a name BINDS to one section rather than pairing by position.
+
+    It sits after a section's symbol table, and WHICH section depends on the
+    module. r48-nonames read it after the last NON-EMPTY section, which is where
+    a form record whose OBJCODE ends on an empty footer carries it (exact on
+    both its carriers, 12/12 and 9/9 entries). r57-procdir measured the other
+    anchor on authored programs: a module whose LAST member has an empty body
+    carries the directory after that empty section, where the non-empty anchor
+    lands short and reports nothing — which is how 14 declared members in four
+    corpus-2 records came to leave no trace at all. Both anchors are tried and
+    the first whose every entry binds wins; they coincide whenever the last
+    member has a body.
     """
     if end is None:
         end = len(buf)
@@ -376,29 +420,33 @@ def procedure_directory(buf: bytes, off: int = 0,
         mod = parse(buf, off)
     except ValueError:
         return []
-    nonempty = [s for s in mod.sections if not s.is_empty]
-    if not nonempty:
+    if not mod.sections:
         return []
-    pos = _skip_symbol_table(buf, nonempty[-1].end + 2, end)
-    out: list[tuple[str, int]] = []
-    while pos + 10 <= end:
-        nlen = _u16le(buf, pos)
-        if not (1 <= nlen <= 128) or pos + 2 + nlen + 8 > end:
-            break
-        ident = _ident_bytes(buf[pos + 2:pos + 2 + nlen], dotted=True)
-        if ident is None:
-            break
-        trailer = buf[pos + 2 + nlen:pos + 2 + nlen + 8]
-        if trailer[6:8] != b"\xff\xff":
-            break
-        out.append((ident, int.from_bytes(trailer[0:4], "little")))
-        pos += 2 + nlen + 8
+    nonempty = [s for s in mod.sections if not s.is_empty]
     offsets = {s.offset for s in mod.sections}
-    if not out or any(o + PROLOGUE_BASE not in offsets for _, o in out):
+    anchors = [mod.sections[-1]]
+    if nonempty and nonempty[-1] is not mod.sections[-1]:
+        anchors.append(nonempty[-1])
+    for anchor in anchors:
+        pos = _skip_symbol_table(buf, anchor.end + 2, end)
+        out: list[tuple[str, int]] = []
+        while pos + 10 <= end:
+            nlen = _u16le(buf, pos)
+            if not (1 <= nlen <= 128) or pos + 2 + nlen + 8 > end:
+                break
+            ident = _ident_bytes(buf[pos + 2:pos + 2 + nlen], dotted=True)
+            if ident is None:
+                break
+            trailer = buf[pos + 2 + nlen:pos + 2 + nlen + 8]
+            if trailer[6:8] != b"\xff\xff":
+                break
+            out.append((ident, int.from_bytes(trailer[0:4], "little")))
+            pos += 2 + nlen + 8
         # Without the offset binding these are bytes that merely look like a
         # directory; an unbound name is worse than no name.
-        return []
-    return out
+        if out and all(o + PROLOGUE_BASE in offsets for _, o in out):
+            return out
+    return []
 
 
 @dataclass
@@ -600,20 +648,36 @@ def _symbol_table_span(buf: bytes, tail: int, end: int) -> int | None:
 
 
 def _prologue_is_ascii_carve(buf: bytes, pos: int, framing: str) -> bool:
-    """True when the candidate's prologue reads as name LETTERS, not binary.
+    """True when the candidate's LENGTH FIELD reads as name LETTERS, not binary.
 
     A genuine prologue is a marker byte plus a little-endian length field;
     its high byte is printable only for declared lengths >= 8224, and a
-    marker+length made entirely of printable ASCII (0x21..0x7E) is exactly
-    what a length field carved out of an uppercase symbol name looks like
+    length field made entirely of printable ASCII (0x21..0x7E) is exactly
+    what a length carved out of an uppercase symbol name looks like
     ('F'|'PS' in CVFPSPROTOCOL, 'T'|'VI' in _SETVISIBLE — the two measured
     Round-35 false anchors).
+
+    The MARKER byte in front of it takes two measured values and both mean the
+    same thing. Round 35's anchors sit in the middle of a name, so the marker is
+    the previous letter and is printable too. r61-carve measured the other end:
+    a table entry is ``<u16 nlen> <name bytes>`` (§7) and every stored name is
+    shorter than 256 bytes, so the length's HIGH byte is zero — an anchor one
+    position further left reads ``00 <c1> <c2>``, a NUL marker with the name's
+    first two characters as its length field. Uppercase characters put that
+    length between 16,705 and 24,415, so such a candidate declares a section
+    8-24 KB long, validates wherever the arithmetic lands on a real 03 00
+    (whose preceding fe closes the one swallowing statement), and hides every
+    real section inside its span. Measured on authored programs that force the
+    shape and on five corpus-2 records, whose own procedure directories name 82
+    sections the walk did not produce because of it.
     """
     plen = PROLOGUE_U32 if framing == "u32" else PROLOGUE_U16
     chunk = buf[pos:pos + plen]
     if len(chunk) < plen:
         return False
-    return all(0x21 <= b <= 0x7E for b in chunk)
+    if not all(0x21 <= b <= 0x7E for b in chunk[1:]):
+        return False
+    return chunk[0] == 0 or 0x21 <= chunk[0] <= 0x7E
 
 
 def sections(buf: bytes, off: int = 0, end: int | None = None,
@@ -628,12 +692,14 @@ def sections(buf: bytes, off: int = 0, end: int | None = None,
 
     Anchor plausibility (Round 37, from r35-container-analysis): a candidate that VALIDATES
     but sits strictly inside the previous accepted section's symbol-table window AND carries
-    a printable-ASCII prologue is rejected as an implausible anchor. Both clauses are forced
+    a name-carved LENGTH FIELD is rejected as an implausible anchor. Both clauses are forced
     by measurement — (i) by the §7 one-table-per-terminator alternation plus real anchors
     sitting systematically at T-1 (hence the open bound), which is why the window excludes
-    T-1; (ii) because only letter-carved length fields are the observed pathology, so every
-    binary-prologue candidate (including the '55 03 00 03 00' empty-frame/table-header
-    ambiguity class) stays untouched. Earlier designs without clause (ii), or authenticating
+    T-1; (ii) because only letter-carved length fields are the observed pathology — under
+    either measured marker, the name's previous letter (round 35) or the zero high byte of
+    the name's own ``<u16 nlen>`` (r61-carve) — so every candidate whose length field is
+    binary (including the '55 03 00 03 00' empty-frame/table-header ambiguity class) stays
+    untouched. Earlier designs without clause (ii), or authenticating
     the window at T-1, reclassified 17 genuine corpus records — 19 counting the two artifact
     candidates themselves — and were discarded by the
     census gate; content thresholds were rejected outright — STATUS #3 documents that any

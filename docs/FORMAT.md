@@ -51,7 +51,16 @@ immediately before the class-init section: `<u16 nlen> <name> <u32> <u32>`, with
 the last u32 overlapping the next section marker. Names include ADD OBJECT
 events (`object.event`). Each class-init `a2`/`a3`/`9e` INT32 is a 1-based
 index into that list (public / PROTECTED / HIDDEN). A non-class program has
-zero class records. The same `object.event` spelling rides the non-class
+zero class records.
+
+The sections between the start of a class module's body region and its
+class-init section are its MEMBERS, one per class-init index, and a member with
+an empty body occupies its section exactly like one with a body: `PROCEDURE m1 /
+ENDPROC / PROCEDURE m2 / RETURN 1 / ENDPROC` and the same pair with a body in
+m1 both compile to four sections with two `a2`. A module with no top-level code
+carries one leading empty section of padding, which top-level code replaces when
+it is present, and a comment-only body compiles to an empty section. So a
+leading empty is padding only in the SURPLUS over the index count (r51-emptymethod). The same `object.event` spelling rides the non-class
 procedure directory (`<u16 nlen> <name> <u32> <u16 0> <u16 0xffff>`) of
 COMPILE FORM METHODS (commandgroup `cdSave.Click`); a standalone PRG
 `PROCEDURE cdSave.Click` is rejected (r44-stmtcount). See
@@ -218,12 +227,24 @@ refute).** The measured digit law for `e9 <D> <u32>` literals is:
 
 Where two readings coincide — exactly when **`hexdigit_count + 1 == len(str(value))`**, which reaches far
 beyond the all-nibble examples 15, 255, 4095, 65535 into whole bands such as 10–15, 100–255, 1000–4095,
-10000–65535 — the wire cannot distinguish authorship and either emission recompiles identically. A
-digits byte fitting NO family is a folded zero-argument builtin whose digits byte is its escape
-number (`0a` = LINENO here). Lifting such a call requires the funcnum-to-name table; emitting the
-folded value instead would hardcode a constant that only recompiles identically at the same line
-position. Whether other builtins fold the same way, and whether non-zero-argument forms exist in
-this family, is UNVERIFIED.
+10000–65535 — the wire cannot distinguish authorship **only when the value itself needs the e9
+opcode** (|v| > 32767). **Corrected 2026-09-04 (round 65, r65-hexlit).** r48-intlit and r65-hexlit
+compiled hexadecimal and decimal of the same 16-bit values: the opcode is the narrowest that holds
+the value (255 and below ride `f8`, 256..32767 ride `f9`, 32768 and above ride `e9`), so a hex
+token of a 16-bit value never rides e9 (`0x0000002a` → `f8 0a 2a`, `0x000002c2` → `f9 0a c202`).
+A stored `e9 0a <u32>` whose payload fits f8/f9 is therefore not a hex token even though digit
+byte `0x0a` is also the zero-padded-hex token length of a ten-character token. It is LINENO():
+`x = LINENO()` at line 2 is `e9 0a 02 00 00 00`, and `x = ABS(LINENO())` folds the same way.
+Emitting `0x000000NN` for that frame recompiles to f8/f9 (the `e9->f8` / `e9->f9` cluster). The
+reader emits `LINENO()`. **Corrected 2026-09-04 (round 67, r67-lineno).** The stored u32 is the
+physical line VFP counted, and the form decides which space:
+
+| form | counting base (oracle r67-lineno) |
+|---|---|
+| `LINENO()` / `LINENO(0)` | 1-based physical lines of the compiled program (a `.prg` file, or a `.scx`/`.vcx` METHODS memo as stored). Comments, blanks, `#DEFINE`, `TEXT` body lines (including empty) count. An `#INCLUDE`d file's lines do not. A `DEFINE CLASS` method in a `.prg` still counts the file, not the method. |
+| `LINENO(1)` | 1-based physical lines of the current procedure *body* — `PROCEDURE`/`FUNCTION` excluded, comments and blanks inside the body counted. A later method's first body line stores 1. |
+
+The argument is not on the wire: `LINENO()` and `LINENO(1)` that store the same u32 are the same six bytes. They diverge once the fold is not on line 1 of a one-procedure program. A `;`-continued statement folds to the last physical line of the statement, not the token line (`x = LINENO() + ;` / ` y` stores 3). `LINENO()+LINENO()` and `LINENO()+0` constant-fold; e9 is gone. Hex/decimal of the same small value still ride f8/f9 (r65-hexlit). The `Num` carries the stored line as `lineno`. `lift_program` inserts blank lines before a fold-bearing statement so `LINENO()` occupies the stored program line, or emits `LINENO(1)` and pads inside the procedure when the stored value is body-relative and the program line cannot move back. Reconstruction ahead of the stored line is the named refusal `lineno_reconstruction_ahead`.
 
 ### Constant folding is irreversible
 

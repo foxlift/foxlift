@@ -3,6 +3,57 @@
 FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the version in
 `pyproject.toml`.
 
+## 0.4.0 — 2026-09-05
+
+A second benchmark corpus, member conservation on both, and the long tail of
+statement and expression readings.
+
+- Second benchmark corpus: 29 public repositories from 23 owners, 170,820
+  modules, measured under the same criteria as the first. Development-split
+  lift: 101,719 of 103,363 sections with zero leaked bytes; compiled
+  programs 5,166 of 5,476. The held-out split of the first corpus, opened
+  once at the wave close: 1,015 of 1,030 sections (98.5%).
+- Member conservation: every declared member of every module on both corpora
+  leaves a trace in the lifted source (0 no-trace members across 33,705 and
+  291,134 declared members). The walker names members from the record's own
+  directory, an empty class still spends its class-init, a length field carved
+  out of a stored name is never mistaken for a section, and no code section
+  begins inside the module header.
+- Statement banks measured whole on the oracle and read in the compiler's own
+  order: the SET family (`IN` work areas, the ON/OFF and value-TO ids, the
+  word-valued settings, `SKIP`/`MARK OF`, `RELATION` with `ADDITIVE` and `IN`,
+  `ORDER` direction, `CLASSLIB ALIAS`/`IN`, `PRINTER … PROMPT`, `REPROCESS`,
+  `TEXTMERGE TO MEMVAR`); `BROWSE` and `DEFINE POPUP`/`DEFINE BAR` clauses;
+  `SCATTER`/`GATHER` destinations, `FIELDS` and `ADDITIVE`; `CALCULATE`, `SUM`
+  and `COUNT`; `CLEAR`; `RETURN TO`; `HELP`; the DO family (`DO … WITH` lists,
+  `DO … IN`, `DO FORM NAME`/`TO`/`WITH`/`NOREAD`/`LINKED`/`NOSHOW`);
+  `REPORT FORM` clauses; `TEXT … ENDTEXT` openers and verbatim body lines;
+  `INSERT … FROM NAME` and `INSERT BLANK` forms; `DECLARE … IN` libraries;
+  `CREATE CURSOR … FROM ARRAY`;
+  the file verbs (`TYPE`, `COMPILE`, `BUILD`, `RUNSCRIPT`,
+  `SAVE`/`RESTORE`, `GETEXPR`), `EXPORT` and `DOCK`; `TRANSACTION` and
+  `PRINTJOB` frames; `RETURN @`; `FOR EACH … AS`; the `HIDDEN`, `IMPLEMENTS`
+  and remaining `PRIVATE` declaration forms.
+- SQL: `DELETE`, `UPDATE`, `DROP TABLE`/`DROP VIEW`, `INSERT … SELECT`,
+  `SELECT` without `INTO`, subqueries (`ANY`, `ALL`, `EXISTS`, `IN`), `UNION`
+  versus `UNION ALL` including nested unions, nested and flat `JOIN … ON`
+  chains, `FULL JOIN`, and `LIKE` with any operands.
+- Expressions: measured arities for the bare-id closers (`ORDER`, `MLINE`,
+  `KEY`, `RELATION`, and more), `RLOCK`, `ERROR`, `POPUPS`, `COL`, `PROW`,
+  `PCOL`, `PRINTSTATUS`, `LOCK`, `DISKSPACE`, `VARREAD`, `LUPDATE`, `QUARTER`;
+  the omitted `DO FORM … WITH` argument; the `::` scope operator for
+  properties and methods, with dotted prefixes; the indexed-member bracket
+  spelling; the bare system-variable id space swept whole.
+- Line layout: a folded `LINENO()` is recognised on the wire (a 16-bit frame
+  whose digit byte is 0x0a), `LINENO()` counts the program while `LINENO(1)`
+  counts the procedure body, and lifted programs put `LINENO()` back on its
+  stored line with the padding the compiler measured.
+- The shipped system application's command-line interface lifts whole:
+  1,971 of 1,971 sections.
+- Instruments: the frozen benchmarks distinguish hard failures from walk
+  movement, the masking audit records every site that rewrites a refusal, and
+  every census check replays its own frozen ledger rather than a live number.
+
 ## 0.3.0 — 2026-08-31
 
 Application extraction, and closed parity on the development corpus.

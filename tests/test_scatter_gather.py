@@ -43,11 +43,24 @@ def test_selectors_stay_contextual_beneath_their_leads():
         _source("54f7000010f701001bfd", ["X", "Y"])        # bare 1b inside an expr
 
 
+def test_destination_bank_lifts_r58():
+    # r58-destbank (round58_destbank_streams.json): c2 is the MEMVAR
+    # destination and 1b/08 are the MEMO/BLANK modifiers stored before it,
+    # under both leads. What cmd_sweep spelled as bare MEMVAR is the commonest
+    # form in the bank (3,011 + 904 corpus-2 occurrences).
+    assert _source("5ec2") == "SCATTER MEMVAR"
+    assert _source("5e08c2") == "SCATTER MEMVAR BLANK"
+    assert _source("5e081bc2") == "SCATTER MEMVAR MEMO BLANK"
+    assert _source("5fc2") == "GATHER MEMVAR"
+    assert _source("5f1bc2") == "GATHER MEMVAR MEMO"
+    assert _source("5f1b4af70000", ["OREC"]) == "GATHER MEMO NAME OREC"
+
+
 @pytest.mark.parametrize("stream", [
-    "5e",            # truncated lead
-    "5ec2",          # MEMO without MEMVAR — cmd_sweep's bare spelling stays outside
-                     # this lane's measured set (mandate: three round-17 forms only)
-    "5e1b",          # MEMVAR without MEMO — unmeasured combination
+    "5e",            # bare lead — SCATTER with no clause emits just 5e, outside
+                     # the corpus and pinned Unsupported since round 42
+    "5e1b",          # MEMO with no destination — VFP9 rejects it (r58-destbank)
+    "5e08",          # BLANK with no destination — rejected the same way
     "5e1bc200",      # trailing byte after the measured MEMVAR MEMO shape
     "5e2800f70000",  # selector position carries a non-TO byte
     "5e28f7",        # symbol operand truncated
@@ -60,8 +73,7 @@ def test_unmeasured_scatter_shapes_fail_loudly(stream):
 
 @pytest.mark.parametrize("stream", [
     "5f",            # truncated lead
-    "5fc2",          # cmd_sweep's bare GATHER MEMVAR spelling — outside the slice
-    "5f1bc2",        # MEMVAR/MEMO clauses are measured under 5e only
+    "5f1b",          # MEMO with no destination — outside the corpus
     "5f1500f70000",  # selector position carries a non-FROM byte
     "5f15",          # symbol operand truncated
 ])
