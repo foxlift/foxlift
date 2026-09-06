@@ -10,6 +10,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from foxlift import oracle_cache, vmlock
+
 VM = os.environ.get("FOXLIFT_ORACLE_VM", "")  # ssh destination of the compile VM, e.g. "user@host"
 KEY = Path.home() / "vfp9-oracle/ssh/id_vfp9"
 VFP = r"C:\Program Files (x86)\Microsoft Visual FoxPro 9\vfp9.exe"
@@ -100,14 +102,62 @@ def compile_dir(src_dir: Path, compile_as: int | None = None) -> dict[str, Compi
     Transfers both ways as a single zip — per-file scp costs a round trip each and dominates
     wall-clock once the corpus passes a few dozen files.
 
-    Callers driving the VM concurrently MUST hold foxlift.vmlock: one licensed VFP serves
-    every lane, and unlocked overlap surfaces as unexplained compile errors in whichever
-    batch lost the race — hours of phantom debugging that is not in the decoder.
+    A file whose result is already in the compile-result store is answered from there and
+    never reaches the VM; the rest are compiled in one batch exactly as before and stored on
+    the way back. See foxlift/oracle_cache.py for what the key covers and what is never
+    stored; `FOXLIFT_ORACLE_NOCACHE=1` bypasses it. One receipt line per call reports
+    files / hits / misses / stored, so the saving is measured rather than asserted.
+
+    One licensed VFP serves every lane, and unlocked overlap surfaces as unexplained compile
+    errors in whichever batch lost the race. So this function takes a foxlift.vmlock slot
+    ITSELF, around the guest round trip and nothing else — after the store lookup, only when
+    there are misses. A batch the store answers in full never waits for a VM it does not
+    touch (round 79's FINDING R79-4: eight warm batch rows waited 722s for exactly that).
+    Callers that hold the lock around the whole call still work unchanged: vmlock.hold is
+    re-entrant within a process and reuses the slot rather than taking a second one.
+
+    The guest identity probe that opens the store is deliberately outside the slot: it reads
+    file hashes over the existing PowerShell channel and never invokes vfp9.exe, so it cannot
+    collide with another lane's compile.
     """
     prgs = sorted(src_dir.glob("*.prg"))
     if not prgs:
         return {}
 
+    store, off = oracle_cache.open_store(compile_as, powershell, driver_script, VFP)
+    results: dict[str, CompileResult] = {}
+    misses = list(prgs)
+    raws: dict[Path, bytes] = {}
+    if store is not None:
+        misses = []
+        for prg in prgs:
+            raws[prg] = raw = prg.read_bytes()
+            got = store.load(prg.stem, raw) if oracle_cache.cacheable(raw) else None
+            if got is None:
+                misses.append(prg)
+            else:
+                results[prg.stem] = CompileResult(name=prg.stem, fxp=got[0], err=got[1])
+
+    stored = 0
+    if misses:
+        with vmlock.hold(label="compile_dir %s" % src_dir.name):
+            fresh = _compile_batch(src_dir, misses, compile_as)
+        results.update(fresh)
+        if store is not None:
+            for prg in misses:
+                res = fresh.get(prg.stem)
+                if res is None or not oracle_cache.cacheable(raws[prg]):
+                    continue
+                if store.save(prg.stem, raws[prg], res.fxp, res.err):
+                    stored += 1
+
+    print(oracle_cache.receipt(len(prgs), len(prgs) - len(misses), len(misses),
+                               stored, off), flush=True)
+    return results
+
+
+def _compile_batch(src_dir: Path, prgs: list, compile_as: int | None) -> dict[str, CompileResult]:
+    """One oracle round trip: zip up, one VFP invocation, zip back, unpack."""
     # A unique remote workspace per batch: concurrent compile_dir calls would otherwise clobber
     # each other's zips, bench dir and driver program on the guest. The fresh directory also
     # retires the stale-.fxp gotcha structurally — nothing from a previous run can be re-run.
@@ -120,7 +170,8 @@ def compile_dir(src_dir: Path, compile_as: int | None = None) -> dict[str, Compi
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         up = td / "in.zip"
-        shutil.make_archive(str(up.with_suffix("")), "zip", src_dir)
+        ship = oracle_cache.ship_dir(src_dir, prgs, td / "ship")
+        shutil.make_archive(str(up.with_suffix("")), "zip", ship)
         _scp(str(up), f"{VM}:{in_zip}")
 
         powershell(driver_script(bench, in_zip, out_zip, driver,

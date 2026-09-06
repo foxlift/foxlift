@@ -49,6 +49,35 @@ dozen files; VFP startup dominates past a few dozen invocations.
 There are also shell drivers at `~/vfp9-oracle/oracle.sh` (`eval`, `compile`, `shell`) for
 one-off interactive work.
 
+## The compile-result store
+
+`compile_dir` looks every file up in a content-addressed store before it ships anything. A hit
+never touches the VM; the misses go up as one batch exactly as before and are stored on the way
+back. Every call prints one receipt, so the saving is measured rather than asserted:
+
+    oracle-cache: files=320 hits=316 misses=4 stored=0
+
+**Keyed on** the source bytes, the file name, the `COMPILE AS` argument or its absence, and an
+oracle identity — the sha256 of the driver-script template, the guest's `vfp9.exe` hash and size,
+and its `C:\oracle\config.fpw`, read once per process. The file name is in the key because the
+compiler embeds the source path in its output (*Fixed-width filenames in probe corpora*, below):
+without it, two programs with identical text would be served each other's `.fxp`, and the authored
+population holds 18 source blobs shared by 36 program names.
+
+**Never stored:** a source naming `#INCLUDE` or `SET PROCEDURE`, whose result depends on text the
+key cannot see, and a batch the guest cut short, which returns neither an `.fxp` nor an `.err` and
+is not an outcome. Both are recompiled every run. A guest whose identity cannot be read disables
+the store loudly and pays full price rather than guessing an identity.
+
+`FOXLIFT_ORACLE_CACHE=<dir>` moves the store (default `~/.foxlift-oracle-cache/`);
+`FOXLIFT_ORACLE_NOCACHE=1` bypasses it, which is the negative control every instrument can invoke.
+
+**Measured** (round 79, the 1,917-program population referee, 3,753 compiles per run, verdict json
+identical in every field but wall time across all three): store off **3,144.5s**, cold **2,481.1s**,
+warm **795.0s**, warm receipts 3,743 hits / 10 misses. Of the warm run's 795s, 722s is waiting for
+a `vmlock` slot in two batches that needed no guest at all — the referee takes the lock before it
+knows whether it has any misses — so the store's own warm cost is about 0.1s per 320-file batch.
+
 ## Gotchas that will cost you an hour
 
 **VFP re-runs a stale `.fxp`.** If a `.fxp` is not older than its `.prg`, `vfp9.exe` executes the

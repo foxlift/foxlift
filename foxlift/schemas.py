@@ -3,6 +3,7 @@
 
 import struct
 
+from foxlift import productions as _prod
 from foxlift import registry as _reg
 
 # ---- expression tokens (postfix RPN unless noted) ------------------------------------------
@@ -461,6 +462,116 @@ CREATE_FROM_MARK = 0x15       # FROM under lead 0x68 (r75-fromarray). Same byte 
                               # the universal FROM_MARK; position under 68 decides.
 CREATE_ARRAY_MARK = 0x04      # ARRAY after FROM under lead 0x68 (r75-fromarray).
                               # Same byte as CALC_TO_ARRAY_MARK / SQL INTO ARRAY.
+
+# ---- the CREATE CURSOR / CREATE TABLE clause bank, as productions ----------
+#
+# One table, read by four readers: the field loop of `_dec_create_cursor`, the
+# CREATE emitter, the oracle matrix that generates its rows from it, and this
+# comment. The list order is the WIRE order; `order` is the SOURCE order, which
+# is not the same (VFP9 writes a field's nullability ahead of its AUTOINC mark
+# however the source spells the two). Every row cites the round that measured
+# it. A clause the table cannot say stays hand-written in the arm, with a
+# comment saying why.
+CREATE_TARGET = "target"          # the cursor / table name
+CREATE_STATEMENT = "statement"    # the clauses between the name and the list
+CREATE_FIELD_NAME = "field_name"  # one field's name
+CREATE_FIELD_TYPE = "field_type"  # one field's type letter
+CREATE_FIELD = "field"            # one field's clauses
+
+CREATE_BANK = _prod.Bank(
+    name="CREATE CURSOR / CREATE TABLE",
+    required_scopes={
+        CREATE_TARGET: "CREATE CURSOR name form",
+        CREATE_FIELD_NAME: "CREATE CURSOR field name form",
+        CREATE_FIELD_TYPE: "CREATE CURSOR type letter unresolved",
+    },
+    clauses=(
+        # -- the target name (round-26 c1/c2, round-28 W4) ------------------
+        _prod.Clause(key="name", scope=CREATE_TARGET, operand=_prod.STR,
+                     refusal="CREATE CURSOR name form"),
+        _prod.Clause(key="name", scope=CREATE_TARGET, operand=_prod.NAMED,
+                     operand_name="name_group",
+                     refusal="CREATE CURSOR name form"),
+        # -- the statement clauses, in wire order ---------------------------
+        _prod.Clause(key="free", scope=CREATE_STATEMENT, marks=(0xC0,),
+                     word="FREE", order=10, verbs=("TABLE",),
+                     refusal="CREATE CURSOR c0 clause unmeasured"),
+        _prod.Clause(key="codepage", scope=CREATE_STATEMENT, marks=(0xBA,),
+                     operand=_prod.INT, word="CODEPAGE = %(codepage)s",
+                     order=20,
+                     refusal="CREATE CURSOR CODEPAGE clause shape"),
+        _prod.Clause(key="from", scope=CREATE_STATEMENT,
+                     marks=(CREATE_FROM_MARK,)),
+        _prod.Clause(key="from_array", scope=CREATE_STATEMENT,
+                     marks=(CREATE_ARRAY_MARK,), operand=_prod.NAMED,
+                     operand_name="array",
+                     word="FROM ARRAY %(from_array)s", order=30,
+                     after=("from",), required=True,
+                     refusal="CREATE CURSOR FROM ARRAY form"),
+        # -- one field ------------------------------------------------------
+        # r75b-names (192 generated rows): a field name is a symbol when the
+        # source spells a bare identifier — a builtin's name, a statement
+        # keyword and a 32-character name all go to the symbol table — a
+        # LITERAL when the source quotes it (`fb` single, `d9` double), and a
+        # GROUP when the source parenthesises an expression. A dotted name is
+        # a compiler refusal.
+        _prod.Clause(key="name", scope=CREATE_FIELD_NAME, operand=_prod.SYM,
+                     refusal="CREATE CURSOR field name form"),
+        _prod.Clause(key="name", scope=CREATE_FIELD_NAME, operand=_prod.NAMED,
+                     operand_name="literal_name",
+                     refusal="CREATE CURSOR field name form"),
+        _prod.Clause(key="name", scope=CREATE_FIELD_NAME, operand=_prod.NAMED,
+                     operand_name="name_group",
+                     refusal="CREATE CURSOR field name form"),
+        _prod.Clause(key="type", scope=CREATE_FIELD_TYPE, operand=_prod.STR,
+                     refusal="CREATE CURSOR type letter unresolved"),
+        _prod.Clause(key="width", scope=CREATE_FIELD, marks=(0x02,),
+                     operand=_prod.GROUP, word="(%(width)s)", order=10,
+                     space=False, closer=True,
+                     refusal="CREATE CURSOR size group unresolved"),
+        # `after=("width",)` is not decoration: `07` is also the field JOIN,
+        # and once a field NAME may be a group (r75b-names) the `fc` behind
+        # the `07` no longer tells the two apart — `f3 L, (cf) C(10)` spells
+        # `07 fc` for a join. Every measured decimals group follows a width
+        # group, so the width is what distinguishes them.
+        _prod.Clause(key="decimals", scope=CREATE_FIELD, marks=(0x07,),
+                     operand=_prod.GROUP,
+                     word="(%(width)s,%(decimals)s)", order=11, space=False,
+                     closer=True, supersedes=("width",), after=("width",),
+                     refusal="CREATE CURSOR size group unresolved"),
+        # The per-field closer: types with no size group (M, L, I) carry none,
+        # so the row is offered only behind a size clause, and then required.
+        _prod.Clause(key="closer", scope=CREATE_FIELD, marks=(0x03,),
+                     after=("width", "decimals"), required=True,
+                     refusal="CREATE CURSOR field tail 0x%02x"),
+        # r54-cursornull: `0a d6` is NOT NULL and `d6` alone is NULL, one slot
+        # behind the type — behind the closer when the field is sized.
+        _prod.Clause(key="nullable", scope=CREATE_FIELD, marks=(0x0A, 0xD6),
+                     word="NOT NULL", order=20),
+        _prod.Clause(key="nullable", scope=CREATE_FIELD, marks=(0xD6,),
+                     word="NULL", order=20),
+        # r75b-autoinc (324 generated rows): AUTOINC is `d8` ALONE, behind the
+        # nullability slot and behind the size closer. `NEXTVALUE n` is
+        # `d4 fc<n>fd` behind it and `STEP n` is `c7 fc<n>fd` behind that, each
+        # optional. NEXTVALUE without AUTOINC and STEP without NEXTVALUE are
+        # compiler refusals, which is what `after` says. The compiler admits
+        # AUTOINC on every type letter — C and N compile as readily as I — so
+        # the table says nothing about type letters.
+        _prod.Clause(key="autoinc", scope=CREATE_FIELD, marks=(0xD8,),
+                     word="AUTOINC", order=30),
+        _prod.Clause(key="nextvalue", scope=CREATE_FIELD, marks=(0xD4,),
+                     operand=_prod.NAMED, operand_name="autoinc_value",
+                     word="NEXTVALUE %(nextvalue)s", order=31,
+                     after=("autoinc",),
+                     refusal="CREATE CURSOR AUTOINC shape"),
+        _prod.Clause(key="step", scope=CREATE_FIELD, marks=(0xC7,),
+                     operand=_prod.NAMED, operand_name="autoinc_value",
+                     word="STEP %(step)s", order=32,
+                     after=("nextvalue",),
+                     refusal="CREATE CURSOR AUTOINC shape"),
+    ),
+)
+
 INSERT_LEAD = 0x72            # 72 bc <target-group> 15 c2 =
                               # INSERT INTO (<expr>) FROM MEMVAR (round-26 i1)
 SQL_INTOTABLE_MARK = (0xBC, 0x31)  # INTO TABLE (<expr>) vs INTO CURSOR bc bd
@@ -613,6 +724,57 @@ REPORT_SCOPE_COUNTED = {"NEXT", "RECORD"}
 
 TRANSACTION_KW = 0xBD    # r50-leadsweep: the keyword byte BEGIN/END TRANSACTION
                          # spend; VFP has no bare BEGIN or END statement.
+INDEX_TAG_MARK = 0xCA    # r76-indexto: the TAG destination of lead 0x26, the byte
+                         # UPDATE SET spends too (CMD_SWEEP cross-family row).
+INDEX_TO_MARK = 0x28     # r76-indexto: the single-index-file destination — the
+                         # universal TO mark standing exactly where TAG stands.
+INDEX_OF_MARK = 0xC3     # r76-indexof: OF <cdx> — the byte SET SKIP OF and
+                         # SET ORDER … OF already spend, here the compound-index
+                         # file behind a finished TAG operand.
+INDEX_COLLATE_MARK = 0x6B     # r76-indexof: COLLATE <seq>, always a group
+INDEX_BINARY_MARK = 0xCB      # r76-indexof: BINARY, one flag byte, stored first
+INDEX_UNIQUE_MARK = 0xD3      # r76-indexto: UNIQUE, one flag byte in the tail bank
+INDEX_COMPACT_MARK = 0xBF     # r76-indexto: COMPACT, the byte REINDEX COMPACT spends
+UNLOCK_LEAD = 0x5A       # r76-unlock: UNLOCK [RECORD <n>] [IN <area>] [ALL]
+                         # — `5a [16 <area>] [23 fc <expr> [fd]] [03]`. Every
+                         # clause byte is one this format already spends
+                         # elsewhere: 16 is the work-area IN mark, and 23
+                         # RECORD / 03 ALL are REPORT_SCOPE_WORDS' own bytes.
+                         # IN sits FIRST on the wire whatever the source order,
+                         # and ALL last; the compiler refuses RECORD beside ALL.
+UNLOCK_IN_MARK = 0x16
+UNLOCK_RECORD_MARK = 0x23
+UNLOCK_ALL_SCOPE = 0x03
+# r76-modify: the byte behind lead 0x2f names the subcommand — one keyword byte
+# per kind, measured whole against every MODIFY VFP9 documents. MODIFY SCREEN
+# is not a keyword of its own: it compiles to FORM's byte with no operand.
+MODIFY_KINDS = {
+    0x12: "FILE", 0x1B: "MEMO", 0x1C: "MENU", 0x26: "FORM", 0x2C: "WINDOW",
+    0x32: "LABEL", 0x33: "REPORT", 0x4C: "QUERY", 0x4F: "CLASS",
+    0xBC: "COMMAND", 0xBE: "PROCEDURE", 0xC2: "DATABASE", 0xC4: "VIEW",
+    0xC5: "PROJECT", 0xCC: "STRUCTURE", 0xD1: "CONNECTION", 0xD5: "GENERAL",
+}
+# Kinds whose operand names an object, not a file: a bare symbol, and for MEMO
+# a dotted member path. Every other kind takes the format's file-name operand.
+MODIFY_NAME_KINDS = frozenset({"GENERAL", "MEMO", "WINDOW"})
+# Kinds where c5 reads NOENVIRONMENT and cc reads PROTECTED; under every other
+# kind c5 reads NOEDIT and cc is not admitted.
+MODIFY_NOENV_KINDS = frozenset({"REPORT", "LABEL"})
+MODIFY_OF_MARK = 0xC3        # OF <classlib> behind a CLASS name
+MODIFY_PROMPT_MARK = 0xCC    # `?` under CLASS; every other kind spells it "?"
+MODIFY_METHOD_MARK = 0xCB    # METHOD <name>; DEFINITION leaves no trace
+MODIFY_REMOTE_MARK = 0xD2    # REMOTE, VIEW only
+MODIFY_PROTECTED_MARK = 0xCC
+
+# ADD / REMOVE clause bytes (contextual UNDER leads 0x96 and 0x97). r76-addremove
+# measures both verbs whole: 4f is the CLASS subcommand beside 31 TABLE and 2e
+# OBJECT, and the class-library pair spends the marks INDEX already spends —
+# c3 for OF (MODIFY_OF_MARK) and 28 for TO (TO_MARK).
+ADD_CLASS_MARK = 0x4F          # ADD CLASS / REMOVE CLASS
+ADD_CLASS_OVERWRITE = 0xC5     # OVERWRITE, last of ADD CLASS's tail
+ADD_TABLE_NAME_MARK = 0x4A     # NAME <long name>, ADD TABLE's alone
+REMOVE_TABLE_DELETE = 0xCD     # DELETE, stored before RECYCLE
+REMOVE_TABLE_RECYCLE = 0xC4    # RECYCLE
 PRINTJOB_LEAD = 0x76     # r50-leadsweep: PRINTJOB f9 05 <u16> … ENDPRINTJOB 77
 ENDPRINTJOB_LEAD = 0x77
 HIDDEN_LEAD = 0x9F   # r50-leadsweep: HIDDEN <prop>[, ...] in class-init —
@@ -858,12 +1020,18 @@ MENU_POPUP_IDS = {0x02: "_MSYSMENU", 0x23: "_MFILE", 0x39: "_MEDIT",
                   0x70: "_MPROG", 0x7D: "_MWINDOW", 0x8E: "_MVIEW",
                   0x90: "_MTOOLS"}
 
-# r49-valsweep: EXTERNAL's kind bank, compiled in one matrix. ARRAY (04) and
-# CLASS (4f) keep their own arms — an ARRAY names symbols, a CLASS a raw
-# payload — and these five share one name operand. LABEL, MENU and QUERY exist
-# in the language, are not measured here, and stay refused.
-EXTERNAL_NAME_KINDS = {0x12: "FILE", 0x14: "FORM", 0x26: "SCREEN",
-                       0x33: "REPORT", 0xBE: "PROCEDURE"}
+# r76-external: EXTERNAL's whole kind table, twelve keyword bytes measured in
+# one matrix — the nine the language documents, plus CLASS, LIBRARY and TABLE.
+# Every other keyword MODIFY spends a byte on (COMMAND, CONNECTION, DATABASE,
+# GENERAL, INDEX, MEMO, PROJECT, STRUCTURE, VIEW, WINDOW) is a compiler refusal
+# behind EXTERNAL, so this table is closed. Eleven of the twelve share one name
+# operand and admit the bare kind with no name at all; ARRAY names symbols
+# instead and REQUIRES at least one.
+EXTERNAL_KINDS = {0x04: "ARRAY", 0x12: "FILE", 0x14: "FORM", 0x1C: "MENU",
+                  0x26: "SCREEN", 0x31: "TABLE", 0x32: "LABEL",
+                  0x33: "REPORT", 0x4C: "QUERY", 0x4F: "CLASS",
+                  0xBE: "PROCEDURE", 0xBF: "LIBRARY"}
+EXTERNAL_ARRAY_CLAUSE = 0x04
 
 AT_LEAD = 0x04
 AT_SAY_MARK = 0xC4
@@ -979,8 +1147,9 @@ PROTECTED_LEAD = 0xA1     # a1 f7 <u16>: PROTECTED <prop> in class-init
 # EXTERNAL command (Guineu CommandTokens EXTERNAL=0x90). Corpus-measured clause
 # bytes under this lead, each forced by its own stored source line:
 EXTERNAL_LEAD = 0x90
-EXTERNAL_CLASS_CLAUSE = 0x4F   # '90 4f fb "…"' <-> 'EXTERNAL CLASS _GDIPLUS.VCX'
-                               # (_reportlistener.vcx::fxlistener s0, 1/1).
+# CLASS (4f) was the first kind bound: '90 4f fb "…"' <-> 'EXTERNAL CLASS
+# _GDIPLUS.VCX' (_reportlistener.vcx::fxlistener s0, 1/1). The whole kind table
+# is EXTERNAL_KINDS below.
                                # Also measured but NOT admitted here: 04=ARRAY
                                # (f7-sym list, 5 methods) and be=PROCEDURE (fb name,
                                # 3 methods) — outside this task's four targets.
@@ -991,8 +1160,36 @@ EXTERNAL_CLASS_CLAUSE = 0x4F   # '90 4f fb "…"' <-> 'EXTERNAL CLASS _GDIPLUS.V
 # when the stored source spells SHARED (MainPara/boxcolor/managecode with it all
 # read SHARED; attendanceforcheck/checkmatinput/chartbillprint/temp without it do not).
 OPEN_DATABASE_LEAD = 0x95
-ODB_NAME_MARK = 0xC2
-ODB_SHARED_FLAG = 0xC2
+ODB_DATABASE_MARK = 0xC2  # r76-open: the DATABASE keyword, present even when
+                          # the command carries no name at all (`95 c2`)
+ODB_SHARED_FLAG = 0xC2    # the same byte behind the name reads SHARED
+ODB_EXCLUSIVE_FLAG = 0xBC    # r76-open: EXCLUSIVE, the byte USE spends too
+ODB_NOUPDATE_FLAG = 0xBE     # r76-open: NOUPDATE, likewise
+ODB_VALIDATE_FLAG = 0x2A     # r76-open: VALIDATE, stored last of the three
+
+# KEYBOARD clause bytes (contextual UNDER lead 0x5c). r76-keyboard measures the
+# pair as one bank: the keys group closes with fd as soon as either flag
+# follows, and the two are stored in this wire order whatever order the source
+# spelled them.
+KEYBOARD_PLAIN_FLAG = 0x3B   # PLAIN, stored first
+KEYBOARD_CLEAR_FLAG = 0x0C   # CLEAR, stored behind PLAIN
+
+# READ's clause bank (contextual UNDER lead 0x39). r76-read compiled every
+# clause FoxPro 2.x documents for READ: fifteen of them still compile on VFP9
+# and MENU does not. Seven stand alone, seven wrap an expression in the
+# statement's own fc group, COLOR SCHEME spends two bytes, and WITH names a
+# 07-joined symbol list. EVENTS is the odd one: it is a flag, and this
+# compiler absorbs everything written behind it, so `39 d5` is its only frame.
+READ_EVENTS_FLAG = 0xD5
+READ_FLAG_WORDS = {0xD5: "EVENTS", 0x25: "SAVE", 0xBE: "CYCLE",
+                   0xD0: "MODAL", 0xCB: "NOMOUSE", 0x19: "LOCK",
+                   0x3E: "NOLOCK"}
+READ_EXPR_WORDS = {0xBC: "ACTIVATE", 0xC0: "DEACTIVATE", 0xCA: "SHOW",
+                   0x2A: "VALID", 0xD2: "WHEN", 0xCE: "TIMEOUT",
+                   0x2E: "OBJECT"}
+READ_COLOR_MARK = 0x0D       # 0d 4e <group> is COLOR SCHEME
+READ_SCHEME_MARK = 0x4E
+READ_WITH_MARK = 0xD1        # WITH <window name list>, 07-joined symbols
 
 # USE clause bytes (contextual UNDER lead 0x51 — never global tokens):
 USE_SHARED_FLAG = 0xC2    # mode-flag slot BEFORE the table name ('USE (e) SHARED …',
@@ -1056,6 +1253,40 @@ RELEASE_LEAD = 0x3C  # 3c (<lvalue> [07 <lvalue>])*: RELEASE name[, name...] —
 # 09/3c"); the other two words land here with their own provenance.
 RELEASE_LIBRARY_KW = 0xBF   # LIBRARY clause word under lead 3c only
 RELEASE_CLASSLIB_KW = 0x52  # CLASSLIB clause word under lead 3c only
+# RELEASE's own clause marks — ORACLE-MEASURED r77-release (90 programs).
+# `3c 03` is ALL and carries EXACTLY ONE of c0 EXTENDED, 18 LIKE <skeleton>,
+# bc EXCEPT <skeleton>: EXTENDED swallows a LIKE or EXCEPT written after it and
+# LIKE swallows a following EXCEPT, so only the first ever reaches the wire.
+# c0 also rides between the POPUP word and its name list, where it is the same
+# EXTENDED. All three bytes are context-local to lead 3c: 03 is the PAREN
+# postfix in expression space, 18 is SET FIELDS' id and bc is DEFINE PAD's
+# keyword.
+RELEASE_ALL_MARK = 0x03
+RELEASE_EXTENDED_MARK = 0xC0
+RELEASE_LIKE_MARK = 0x18
+RELEASE_EXCEPT_MARK = 0xBC
+# The clause words RELEASE spends, each followed by its operand bank. WINDOW
+# and POPUP take a NAME-space operand, the other four a FILE-name one; MENU is
+# 0x1c, MODULE 0xbd and PROCEDURE 0xbe. PAD (0xbc) and BAR (0x06) are NOT here:
+# they carry a `c3 OF <parent>` tail of their own and keep their own arms.
+# Singular and plural spell the same byte — WINDOW and WINDOWS are one frame.
+RELEASE_WORDS = {
+    0x1C: "MENU", 0x2C: "WINDOW", 0x4F: "CLASS", 0x52: "CLASSLIB",
+    0xBD: "MODULE", 0xBE: "PROCEDURE", 0xBF: "LIBRARY", 0xC6: "POPUP",
+}
+# r83-release swept the words RELEASE takes and closed the table. CLASS is
+# 0x4f — the byte CLEAR's operand table and EXTERNAL's kind table already bind
+# to the same word — and it is CLASSLIB's twin in every measured respect:
+# `RELEASE CLASS x` is `3c 4f fb'x'`, `RELEASE CLASS ALIAS al` is
+# `3c 4f 02 f7<AL>` (the one corpus-2 occurrence the lvalue reader charged as
+# `lvalue opcode 0x4f`), and an ALIAS written behind a name is dropped. FORM,
+# OBJECT and PROGRAM are NOT clause words: each compiles to `3c f7 <sym>`, a
+# plain name in the release list, which is the control that keeps this table
+# honest.
+RELEASE_FILE_WORDS = ("CLASS", "CLASSLIB", "LIBRARY", "MODULE", "PROCEDURE")
+# PAD (0xbc, DEFINE_PAD_KW) and BAR (0x06, ON_SELECTION_BAR) stay out of
+# RELEASE_WORDS: they take a `c3 OF <parent>` tail of their own and their own
+# arms read it.
 LOCATE_LEAD = 0x2D   # 2d 13 fc <rpn-to-end>: LOCATE FOR <cond> — no closing fd;
                      # RPN runs to stream end (forced across 12 aligned methods).
                      # Variants whose RPN ends mid-operator stay Unsupported.
@@ -1125,6 +1356,18 @@ PUSH_POP_MENU_IDS = {
 }
 PACK_LEAD = 0x33     # bare PACK — ORACLE-measured (CMD_SWEEP.md row PACK, snippet
                      # 'PACK'); corpus-aligned at systeminfo.scx::frmSysinfo.
+# SEEK — ORACLE-MEASURED r77-seek (55 programs). The whole clause bank is
+#   45 [16 <alias>] [c3 <index>] [c3 <cdx>] [bd|3c] fc <expr>
+# and the search expression is LAST, its fc group running UNCLOSED to the end
+# of the statement (CMD_SWEEP.md row SEEK). Every clause is stored ahead of it
+# in that fixed order whatever the source order — `IN tt ORDER TAG t` and
+# `ORDER TAG t IN tt` are one frame. The 16 IN mark is SET's (r52-setin) and
+# bd/3c are SET ORDER's ASCENDING/DESCENDING (r71-order), same bytes and same
+# roles. c3 is the ORDER mark and, a second time in the same statement, the OF
+# mark: position decides, never a global token map (c3 is also ON SELECTION's
+# OF and a bare group-closer id elsewhere).
+SEEK_LEAD = 0x45
+SEEK_ORDER_MARK = 0xC3   # ORDER, then OF, under lead 0x45 only
 COPY_LEAD = 0x11     # 11 [12 <from-str>] 28 <to-str>: COPY [FILE <from>] TO <to>.
                      # Full two-clause form ORACLE-measured (CMD_SWEEP.md row COPY,
                      # snippet 'COPY FILE cpf1.txt TO cpf2.txt'); the TO-only form
@@ -1133,6 +1376,42 @@ COPY_LEAD = 0x11     # 11 [12 <from-str>] 28 <to-str>: COPY [FILE <from>] TO <to
                      # exactly once in the scored universe — samples of one.
 COPY_FILE_MARK = 0x12  # FILE-from clause under lead 11 only (doubles as the GE
                        # comparison in expression space — contextual, not global)
+# COPY's clause bank behind the target — ORACLE-MEASURED r77-copy (144
+# programs). The wire order under lead 0x11 is one fixed sequence whatever
+# order the source spelled it:
+#   11 [12 <from>] [1b <memo field>] [28 [04 ARRAY] <target>]
+#      [cc STRUCTURE [c0 EXTENDED]] [d2 CDX] [11 FIELDS <list|18|bc|group>]
+#      [[d4 TYPE] <type word> [d1 [bf] <delimiter>]]
+#      [c2 DATABASE <name> [4a NAME <long>]] [51 AS <codepage>] [30 NOOPTIMIZE]
+#      [<scope>] [13 FOR <cond>] [2b WHILE <cond>] [01 ADDITIVE]
+# and the source spells scope / FOR / WHILE ahead of CDX, NOOPTIMIZE, TYPE and
+# AS. CONTEXT-LOCAL to lead 0x11: 11 is the FIELDS mark here, 01/04/08/c0/d2
+# are not tokens, and the type-word bytes collide freely with other banks.
+COPY_TYPE_WORDS = {0xBB: "XL5", 0xBD: "FOXPLUS", 0xBE: "DELIMITED",
+                   0xBF: "DIF", 0xC3: "SYLK", 0xC4: "MOD", 0xC5: "WK1",
+                   0xC6: "WKS", 0xC7: "XLS", 0xC8: "RPD", 0xC9: "FW2",
+                   0xCA: "WR1", 0xCB: "WRK", 0xCE: "FOX2X", 0xCF: "PDOX",
+                   0xD0: "SDF", 0xD5: "CSV"}   # XL8 is refused by this VFP9
+COPY_DELIM_WITH = 0xD1        # DELIMITED's WITH mark
+COPY_DELIM_WORD = 0xBF        # ... and CHARACTER / TAB / BLANK ride behind it;
+                              # a bare `d1 <char>` is `WITH <char>` with no word
+COPY_DELIM_WORDS = {0xC4: "TAB", 0x08: "BLANK"}
+COPY_SCOPE_WORDS = {0x03: "ALL", 0x24: "REST", 0x1E: "NEXT", 0x23: "RECORD"}
+COPY_SCOPE_COUNTED = {"NEXT", "RECORD"}   # word + fc <count> [fd]
+COPY_FOR_MARK = 0x13
+COPY_WHILE_MARK = 0x2B
+COPY_NOOPTIMIZE = 0x30
+COPY_STRUCTURE_MARK = 0xCC
+COPY_EXTENDED_MARK = 0xC0     # STRUCTURE EXTENDED
+COPY_CDX_MARK = 0xD2          # [WITH] CDX and [WITH] PRODUCTION are one byte
+COPY_DATABASE_MARK = 0xC2
+COPY_NAME_MARK = 0x4A         # DATABASE <db> NAME <long table name>
+COPY_CODEPAGE_MARK = 0x51     # AS <codepage>
+COPY_ADDITIVE_MARK = 0x01     # COPY MEMO <field> TO <file> ADDITIVE
+COPY_ARRAY_MARK = 0x04
+COPY_MEMO_MARK = 0x1B
+COPY_FIELDS_LIKE = 0x18       # FIELDS LIKE <skeleton>
+COPY_FIELDS_EXCEPT = 0xBC     # FIELDS EXCEPT <skeleton>
 FOR_EACH_LEAD = 0xB5 # b5 <loopvar> 16 <collection> [c2] (f9 05 <u16> |
                      # e9 00 <u32>) = FOR EACH <var> IN <collection>
                      # [FOXOBJECT]. Corpus-forced from the scored pairs
@@ -1196,6 +1475,25 @@ SQLSEL_TAILS = {
     (0x3A,): ("NOWAIT",),
     (0x3A, 0x39): ("NOWAIT", "NOCONSOLE"),
 }
+# r74-columns: the destination and the display words are ONE clause region in
+# a fixed wire order, whatever order the source wrote them in — ORACLE-MEASURED
+# over 170 destination x tail rows:
+#     [bc <into-target>] [3a NOWAIT] [3b PLAIN] [28 <to-target>]
+#     [39 NOCONSOLE] [cd NOFILTER] [d7 READWRITE] [d1 f7 <preference>]
+# READWRITE and NOFILTER are not alternatives: `NOFILTER READWRITE` and
+# `READWRITE NOFILTER` are the one frame `cd d7`. INTO TABLE and INTO DBF are
+# the one frame `bc 31` and the wire cannot tell them apart.
+SQL_INTO_MARK = 0xBC
+SQL_INTO_WORDS = {0xBD: "CURSOR", 0x31: "TABLE", 0x04: "ARRAY"}
+SQL_TO_MARK = 0x28
+SQL_TO_WORDS = {0x12: "FILE", 0x21: "PRINTER", 0x26: "SCREEN"}
+SQL_TO_FILE_ADDITIVE = 0x01
+SQL_TO_PRINTER_PROMPT = 0x22
+SQLSEL_NOCONSOLE_MARK = 0x39
+SQLSEL_NOWAIT_MARK = 0x3A
+SQLSEL_PLAIN_MARK = 0x3B
+SQLSEL_READWRITE_MARK = 0xD7
+SQLSEL_PREFERENCE_MARK = 0xD1  # PREFERENCE <name>: d1 f7 <u16>, region-final
 # The SQL SUBQUERY operand — ORACLE-MEASURED r54-subquery (20 programs). The
 # opcode carries the block's own byte LENGTH, so a reader knows where it ends
 # without parsing it: `e8 <u16 n> <n bytes>`. The n bytes are `00` and then a
@@ -1388,6 +1686,115 @@ MEASURED_LOCAL_GROUP_CLOSERS = {
     0x9B: (1, 26),  # ALLTRIM — r44-arity compile_dir (vmlock r44-arity):
                     # ALLTRIM() too-few; ALLTRIM(c) through 26 args compile;
                     # 27 args too-many. function_ids.json arity stays "?".
+    # ---- r80-closers batch e1_1: the one-argument envelope, bare bank ----
+    # The generated closer sweep (Task 3: round80_closer_sweep.py,
+    # round80_closers.json over round80_closers_streams.json, vmlock label
+    # "r80-closers") spelled every dark builtin with 0..4 UNDECLARED memory
+    # variables in three contexts — `x = F(v1…)`, `IF F(v1…)`,
+    # `x = TRANSFORM(F(v1…))` — so no row could be refused on argument TYPE.
+    # These ids compile at exactly one argument and are a compiler refusal at
+    # zero and at two, in all three contexts. Name from BARE_IDS; the
+    # generated registry's arity stays "?".
+    #
+    # EMPTY (0xA1) and LOWER (0x40) measured (1, 1) here too and were WITHHELD
+    # by this batch. Both already close unconditionally through
+    # CORPUS_ALIGNED_BARE_CLOSERS, and corpus-2 development closed groups on
+    # them with TWO operands on the reader's stack, so the row raised rather
+    # than read: EMPTY 61 sections / 39 occurrences / 10 records, LOWER 1 / 1 /
+    # 1 (round80_scout_region.json). Skeleton
+    # `( 43 43 f8 01 01 e5 01 00 f4 SYM SYM a1 0b )` — an array-element
+    # receiver the expression reader did not fold into one operand. Same
+    # refusal UPPER (0x66) carried, and settling it was a reader question, not
+    # an arity one. Batch `narrow2` below is that reader arriving.
+    0x20: (1, 1),  # CHR
+    0x25: (1, 1),  # DAY
+    0x31: (1, 1),  # FKLABEL
+    0x39: (1, 1),  # ISALPHA
+    0x3B: (1, 1),  # ISLOWER
+    0x3C: (1, 1),  # ISUPPER
+    0x48: (1, 1),  # MONTH
+    0x59: (1, 1),  # SQRT
+    0x69: (1, 1),  # YEAR
+    0x6A: (1, 1),  # DMY
+    0x77: (1, 1),  # CEILING
+    0x79: (1, 1),  # FLOAT
+    0x7A: (1, 1),  # FLOOR
+    0x89: (1, 1),  # RTOD
+    0x8B: (1, 1),  # SIGN
+    0x8D: (1, 1),  # DTOR
+    0xA4: (1, 1),  # PACK
+    # ---- r80-closers batch `tail`: the nine remaining envelopes, bare bank ----
+    # Same sweep, same criterion as batch e1_1 above (round80_closers.json over
+    # round80_closers_streams.json): 0..4 undeclared memory variables in three
+    # contexts, and a row is read only when its own statement closes a group on
+    # the registry id. Nine envelopes land together because one referee proof
+    # and one census carry them: the referee scores every compiled row of the
+    # batch individually, and the census reports a tightening BY ID — the
+    # lifter's refusal string is `bare 0xNN arity rejected at K args` — so a
+    # merged batch is attributed without being split. Name from BARE_IDS; the
+    # generated registry's arity stays "?".
+    0x1B: (0, 1),  # ALIAS
+    0x1D: (2, 3),  # AT
+    0x1E: (0, 1),  # BOF
+    0x24: (0, 3),  # DATE
+    0x27: (0, 1),  # DELETED
+    0x29: (1, 2),  # DOW
+    0x2E: (0, 1),  # FCOUNT / FLDCOUNT — one id, two spellings
+    0x30: (1, 2),  # FILES
+    0x34: (0, 1),  # FOUND
+    0x3A: (0, 0),  # ISCOLOR
+    0x49: (1, 2),  # NDX
+    0x4E: (0, 1),  # RECCOUNT
+    0x50: (0, 1),  # RECSIZE
+    0x51: (2, 2),  # REPLICATE
+    0x52: (2, 2),  # RIGHT
+    0x54: (2, 2),  # ROUND
+    0x57: (0, 1),  # SELECT
+    0x5A: (1, 3),  # STR
+    0x5F: (1, 2),  # TRANSFORM
+    0x64: (0, 0),  # UPDATED
+    0x68: (0, 1),  # VERSION
+    0x6F: (0, 1),  # MEMORY
+    0x86: (0, 1),  # RAND
+    0x92: (2, 2),  # FREAD
+    0x93: (2, 3),  # FWRITE
+    0x94: (0, 0),  # FERROR
+    0x97: (1, 3),  # FGETS
+    0x9C: (2, 2),  # ATLINE
+    0x9D: (3, 3),  # CHRTRAN
+    0x9E: (0, 1),  # FILTER
+    0xA7: (0, 0),  # SECONDS
+    0xAA: (0, 1),  # USED
+    0xAB: (3, 3),  # BETWEEN
+    0xAF: (2, 2),  # OCCURS
+    0xB0: (2, 3),  # PADC
+    0xBB: (1, 2),  # FULLPATH
+    0xC4: (0, 0),  # PARAMETERS
+    0xCB: (2, 2),  # FCHSIZE
+    0xD2: (2, 2),  # NVL
+    # ---- r80-closers batch narrow2: one of the two rows batch e1_1 withheld --
+    # Same sweep reading as e1_1 above — EMPTY compiles at exactly one argument
+    # and is a compiler refusal at zero and at two, in all three contexts. What
+    # withheld it was the corpus, not the oracle: on the reader of the day the
+    # group's array-element operand `43 <sub> e5 <arr> f4 <hop> <prop>` arrived
+    # at the closer as TWO stack entries. Round 78 law 2 landed that arm, and
+    # round80_narrow_gates2.json re-measures the same frames on it —
+    # `EMPTY(arr(1).p1.p2)`, `EMPTY(arr(1).p1.p2.p3)` and `EMPTY(arr(v1).p1.p2)`
+    # now lift with the row installed, where Task 4b measured them refused —
+    # so all 61 sections in 10 records fold and the row costs nothing
+    # (round80_narrow2_census.json).
+    #
+    # LOWER (0x40) stays WITHHELD. Its one section spells the residue round 78
+    # law 2 names as a refusal of its own: the TWO-SUBSCRIPT operand, where two
+    # values are pushed before the `e5` marker and one frame does not say which
+    # belongs to the element. With the row absent the reader does not fail
+    # there, it FABRICATES — that statement lifts to a two-argument `LOWER(1,
+    # …)`, which the sweep measured as a compiler refusal — so the section
+    # counts as lifted while holding text VFP9 would not compile. The row would
+    # turn that into an honest refusal at the cost of one SGFOX section, and
+    # this lane holds to no-lift-regression: settling it is the two-subscript
+    # element read, not the table.
+    0xA1: (1, 1),  # EMPTY
 }
 if not set(MEASURED_LOCAL_GROUP_CLOSERS) <= BUILTIN_BARE.keys():
     raise AssertionError("local-arity bare closer missing from measured registry")
@@ -1413,6 +1820,113 @@ MEASURED_EA_GROUP_CLOSERS = {
     0xEC: (1, 2),  # QUARTER — r73-tail: QUARTER(date) / QUARTER(date, n);
                    # QUARTER() too-few. `ea ec`. Bare opcode 0xec is a
                    # different class.
+    # ---- r80-closers batch e1_1: the one-argument envelope, ea bank ----
+    # The same sweep, same criterion (round80_closers.json). Each id compiles
+    # at exactly one argument and refuses zero and two. Name stays a generated
+    # registry property; function_ids.json arity stays "?".
+    0x25: (1, 1),  # SYSMETRIC
+    0x31: (1, 1),  # DDETERMINATE
+    0x37: (1, 1),  # ANSITOOEM
+    0x41: (1, 1),  # SOUNDEX
+    0x45: (1, 1),  # TAN
+    0x46: (1, 1),  # ACOS
+    0x48: (1, 1),  # ATAN
+    0x4B: (1, 1),  # LOG10
+    0x64: (1, 1),  # SQLCANCEL
+    0x67: (1, 1),  # SQLDISCONNECT
+    0x7A: (1, 1),  # AERROR
+    0x7B: (1, 1),  # SQLCOMMIT
+    0x7C: (1, 1),  # SQLROLLBACK
+    0x7D: (1, 1),  # MTON
+    0x7E: (1, 1),  # NTOM
+    0x7F: (1, 1),  # DTOT
+    0x82: (1, 1),  # CTOT
+    0xA0: (1, 1),  # CREATEBINARY
+    0xA4: (1, 1),  # DBUSED
+    0xB7: (1, 1),  # LENC
+    0xC8: (1, 1),  # DROPOFFLINE
+    0xD3: (1, 1),  # JUSTEXT
+    0xD5: (1, 1),  # JUSTPATH
+    0xE8: (1, 1),  # ASTACKINFO
+    0xF4: (1, 1),  # ASESSIONS
+    # ---- r80-closers batch `tail`: the nine remaining envelopes, ea bank ----
+    # The same sweep and the same merge argument as the bare block above. Name
+    # stays a generated registry property; function_ids.json arity stays "?".
+    0x00: (2, 2),  # PRMPAD
+    0x02: (2, 2),  # MRKPAD
+    0x05: (0, 1),  # BARCOUNT / CNTBAR — one id, two spellings
+    0x07: (2, 2),  # GETBAR
+    0x0A: (0, 1),  # WPARENT
+    0x0B: (0, 2),  # WCHILD
+    0x0C: (0, 0),  # RDLEVEL
+    0x0E: (2, 3),  # AINS
+    0x14: (1, 2),  # AFIELDS
+    0x1B: (2, 2),  # SKPBAR
+    0x1D: (0, 1),  # WMAXIMUM
+    0x21: (2, 2),  # GETPEM
+    0x2F: (2, 3),  # DDESETSERVICE
+    0x32: (0, 1),  # DDELASTERROR
+    0x39: (3, 3),  # CPCONVERT
+    0x3B: (0, 1),  # CPDBF
+    0x3C: (1, 3),  # IDXCOLLATE
+    0x3E: (0, 1),  # CAPSLOCK
+    0x40: (0, 1),  # INSMODE
+    0x42: (2, 2),  # DIFFERENCE
+    0x50: (1, 2),  # PADPROMPT
+    0x51: (0, 1),  # HOME
+    0x54: (0, 3),  # UNIQUE
+    0x56: (0, 2),  # TAGCOUNT
+    0x58: (1, 2),  # FDATE
+    0x5B: (0, 0),  # ISMOUSE
+    0x5C: (1, 2),  # GETOBJECT
+    0x5D: (2, 2),  # OBJTOCLIENT
+    0x5E: (3, 3),  # RGB
+    0x5F: (1, 2),  # OLDVAL
+    0x61: (2, 2),  # ACLASS
+    0x63: (2, 2),  # COMPOBJ
+    0x68: (3, 3),  # PEMSTATUS
+    0x6A: (2, 2),  # SQLGETPROP
+    0x6B: (1, 3),  # SQLMORERESULTS
+    0x81: (1, 2),  # TTOC
+    0x89: (1, 2),  # CURSORGETPROP
+    0x8B: (3, 3),  # DBGETPROP
+    0x91: (2, 3),  # SETFLDSTATE
+    0x96: (0, 0),  # DBC
+    0x98: (2, 2),  # ADBOBJECTS
+    0x9A: (0, 0),  # GETPRINTER
+    0x9E: (0, 3),  # GETCP
+    0x9F: (0, 2),  # SQLSTRINGCONNECT
+    0xA2: (0, 2),  # ISEXCLUSIVE
+    0xA3: (0, 0),  # TXNLEVEL
+    0xA8: (2, 2),  # BITRSHIFT
+    0xAB: (1, 3),  # BITNOT
+    0xAE: (2, 2),  # BITTEST
+    0xAF: (1, 3),  # BITCLEAR
+    0xB0: (2, 3),  # AT_C
+    0xB1: (2, 3),  # ATCC
+    0xB2: (2, 3),  # RATC
+    0xB3: (2, 2),  # LEFTC
+    0xB5: (2, 3),  # SUBSTRC
+    0xBA: (2, 2),  # LIKEC
+    0xBC: (0, 1),  # IMESTATUS
+    0xBF: (1, 2),  # BINTOC
+    0xC0: (1, 2),  # CTOBIN
+    0xC2: (0, 2),  # ISRLOCKED
+    0xC3: (0, 1),  # LOADPICTURE
+    0xC4: (2, 2),  # SAVEPICTURE
+    0xCA: (2, 2),  # AVCXCLASSES
+    0xD0: (2, 2),  # FORCEEXT
+    0xD8: (2, 2),  # COMRETURNERROR
+    0xDC: (1, 2),  # AMOUSEOBJ
+    0xDD: (1, 2),  # COMCLASSINFO
+    0xDF: (0, 0),  # ISHOSTED
+    0xE2: (2, 3),  # CREATEOBJECTEX
+    0xE5: (0, 3),  # XMLUPDATEGRAM
+    0xE9: (2, 3),  # EVENTHANDLER
+    0xED: (1, 2),  # GETWORDCOUNT
+    0xEF: (2, 2),  # ALANGUAGE
+    0xF2: (2, 3),  # APROCINFO
+    0xF3: (1, 2),  # WDOCKABLE
 }
 if not set(MEASURED_EA_GROUP_CLOSERS) <= BUILTIN_ESCAPES.keys():
     raise AssertionError("ea-arity closer missing from measured registry")
@@ -1659,6 +2173,15 @@ BAR_KEY_MARK = 0x17          # KEY fb<key-text> [07 fc<label>fd] (round-37 D6, e
 # Popup verbs that ride their own statement leads (round-37 D5 measured the paren-name
 # spellings; e06 adds the bare-name ones that the corpus carries).
 DEACTIVATE_POPUP_LEAD = 0x75  # 75 c6 f7<sym> (e06; c79070eeff459e07:25#126)
+# DEACTIVATE's word bank — ORACLE-MEASURED r77-deactivate (39 programs). The
+# frame is `75 <word> <operand> (07 <operand>)*` with the same object words
+# RELEASE spends (1c MENU, 2c WINDOW, c6 POPUP) and the same name-space
+# operand bank: a bare f7 symbol, a quoted fb/d9 literal beside the word, a
+# parenthesised fc..03 group, an ec system-menu id, or the 03 ALL byte. MENU
+# and POPUP also take the word ALONE (`75 1c`, `75 c6`); a bare WINDOW word is
+# a syntax error. ACTIVATE WINDOW's SAME / SAVE / NOSHOW compile here and leave
+# no mark at all.
+DEACTIVATE_WORDS = {0x1C: "MENU", 0x2C: "WINDOW", 0xC6: "POPUP"}
 MOVE_POPUP_LEAD = 0x7A        # 7a c6 f7<sym> 28 fc<row>fd 07 fc<col> (e06; …:25#121)
 #
 # `DEFINE BAR <system-menu constant>` puts the constant in the bar-NUMBER slot as

@@ -128,3 +128,62 @@ def _compare_frames_lists(fa, fb, syma, symb) -> Comparison:
         return Comparison(False, "symbol tables differ",
                           {"a": syma, "b": symb})
     return Comparison(True, "identical")
+
+
+def certify_compiled(fxp_a: bytes, fxp_b: bytes) -> Comparison:
+    """Certify two standalone compiled programs: the sections are a bijection.
+
+    `compare_compiled` matches the first program's sections IN ORDER against the
+    second's, advancing a cursor past candidates that do not match, and never
+    looks at what the cursor leaves behind. A second program carrying EXTRA
+    sections therefore compares equal, and so does one whose sections are the
+    first's with anything at all interleaved: the criterion there is "every
+    section of A is matched, in order", which is a subsequence test, not an
+    equality.
+
+    That is deliberate where it is used for wrapper scaffolding
+    (`compare_module_frames`), and it is the hole everywhere else. This function
+    closes it: equal only when the two non-empty section lists have the same
+    length and pair up position for position — every section of A matched, every
+    section of B matched exactly once, nothing left over, same order — under the
+    same frame and symbol-table equality `compare_sections` applies.
+
+    Empty sections are excluded on both sides, exactly as the ordered match
+    excludes them on the original's side; their counts are reported in `detail`
+    so a phantom empty section stays visible without deciding the verdict. It is
+    a container artifact (r46-classinit), not a section a lift lost.
+
+    Additive: nothing in this module changes behaviour because this exists.
+    `compare_compiled` remains the campaign's scorer until a closer rules on
+    switching, and this is reported beside it.
+    """
+    try:
+        ma = container.parse(fxp_a)
+    except ValueError as e:
+        return Comparison(False, f"a unparsable: {e}")
+    try:
+        mb = container.parse(fxp_b)
+    except ValueError as e:
+        return Comparison(False, f"b unparsable: {e}")
+    return _certify_bijection(ma, mb)
+
+
+def _certify_bijection(ma, mb) -> Comparison:
+    a = [s for s in ma.sections if not s.is_empty]
+    b = [s for s in mb.sections if not s.is_empty]
+    empties = {"a_sections": len(a), "b_sections": len(b),
+               "a_empty": len(ma.sections) - len(a),
+               "b_empty": len(mb.sections) - len(b)}
+    if not a:
+        return Comparison(False, "original has no non-empty sections", empties)
+    if len(a) != len(b):
+        return Comparison(
+            False, f"section count {len(a)} != {len(b)}",
+            dict(empties, extra_sections=len(b) - len(a)))
+    for i, (x, y) in enumerate(zip(a, b)):
+        c = _compare_frames_lists(_section_frames(x), _section_frames(y),
+                                  x.symbols, y.symbols)
+        if not c.equal:
+            return Comparison(False, f"section {i}: {c.reason}",
+                              dict(empties, section=i, **c.detail))
+    return Comparison(True, "sections are a bijection in order", empties)

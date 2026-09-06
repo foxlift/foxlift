@@ -3,6 +3,52 @@
 FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the version in
 `pyproject.toml`.
 
+## 0.5.0 — 2026-09-06
+
+The wave-2 close: both corpora and both sealed splits measured together on one
+tree, and constant folds written back from an oracle-confirmed table.
+
+- Wave 2 measured whole. Development split of the second corpus: 102,798 of
+  103,363 sections lift with zero leaked bytes (0.4.0: 101,719); compiled
+  programs 5,250 of 5,476; blocked sections 1,644 to 565. The held-out split of
+  the first corpus, opened once at the close: 1,022 of 1,030 sections (99.2%).
+  The sealed split of the second corpus, measured for the second time ever:
+  13,809 of 13,978 sections (98.8%, from 13,328). The table path over all 19
+  second-corpus repositories: 273,610 of 279,698 sections (97.8%).
+- Member conservation holds everywhere: 0 no-trace members on both corpora and
+  on the sealed second-corpus split. Every pin held through twenty-six serial
+  merges and no new failure shape appeared on the first corpus.
+- SQL SELECT: aggregates as operands of column expressions, comma-separated
+  FROM lists each with its own JOIN chain, qualified stars, the whole
+  destination bank (INTO CURSOR/TABLE/DBF/ARRAY, TO FILE ADDITIVE, TO PRINTER
+  PROMPT, TO SCREEN, NOWAIT, PLAIN, NOCONSOLE, NOFILTER, READWRITE,
+  PREFERENCE), UNION arms with their own WHERE, GROUP BY and HAVING and a
+  shared ORDER BY list, and DISTINCT spelled as the author typed it, told
+  apart from a variable of the same spelling.
+- CREATE CURSOR and CREATE TABLE read from one declarative clause table:
+  AUTOINC with NEXTVALUE and STEP, quoted and parenthesised field names, FREE
+  and CODEPAGE.
+- Statement banks measured whole: INDEX TO and OF with its options, UNLOCK,
+  the MODIFY kinds, OPEN DATABASE, DEBUGOUT lists, KEYBOARD, EXTERNAL lists,
+  READ's keywords, ADD and REMOVE CLASS; SEEK's clauses; RELEASE's operand
+  banks, RELEASE PAD and BAR OF, RELEASE CLASS; DEACTIVATE; COPY's scope,
+  FOR and WHILE, FIELDS, TYPE and DELIMITED forms and its MEMO and ARRAY
+  spellings; bare statements rooted in a system object or a scope-resolved
+  member; quoted REPLACE and DO FORM TO targets.
+- Assignment targets: array-element PUT and READ hop runs, system-object
+  roots, STORE target runs, WITH-scoped chains (a single letter behind the dot
+  is a work-area alias), and indexed members reached through a second call
+  link.
+- Expressions: 159 measured closer arities from the generated sweep, EMPTY
+  included. A constant-folded numeric literal is written back as the shortest
+  source expression the oracle confirms compiles to the stored frame: 86
+  frames, 275 literals in 74 sections, counted on their own line and never
+  inside the lift count.
+- Instruments: a content-addressed compile-result store in front of the
+  oracle, one shared matrix runner for every measurement, a bijective
+  certificate beside the ordered comparator, a record-level work queue, and
+  the wave-2 scorecard with both reveals in docs/STATUS.md.
+
 ## 0.4.0 — 2026-09-05
 
 A second benchmark corpus, member conservation on both, and the long tail of

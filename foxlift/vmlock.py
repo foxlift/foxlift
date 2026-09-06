@@ -21,6 +21,16 @@ LOCK = Path.home() / ".foxlift-oracle.lock"
 # Raise SLOTS only by repeating that measurement at the new count, never by assumption.
 SLOTS = 2
 
+_HELD = 0
+"""How deep this process is inside hold(). One slot, however many callers.
+
+`oracle.compile_dir` takes a slot around its own guest round trip, and 186
+scripts in probes/ already wrap that call in a hold of their own. Without this
+counter the inner hold would ask for a SECOND slot: half the oracle's capacity
+spent on one VFP invocation, and a deadlock against itself once the other slot
+is a sibling lane's. The slot belongs to the process, so the process counts it.
+"""
+
 
 def _slot_paths():
     return [LOCK.with_name(LOCK.name + ".%d" % i) for i in range(SLOTS)]
@@ -28,12 +38,25 @@ def _slot_paths():
 
 @contextmanager
 def hold(label: str = "", timeout: float = 3600.0, poll: float = 2.0):
-    """Take one of SLOTS oracle slots. Wrap every VM-driving call in this.
+    """Take one of SLOTS oracle slots, or re-enter the one this process holds.
 
     Raises TimeoutError rather than proceeding unlocked: a silent overlap would show up as a
     mystery compile failure in whichever lane lost the race, which is the worst way to find out.
+
+    Re-entrancy is per PROCESS, not global: another process still waits, which is the whole
+    point of the lock. The outer hold's label stays in the slot file, so a lane waiting on a
+    slot reads who is holding it rather than the innermost call that re-entered it.
     """
     import fcntl
+
+    global _HELD
+    if _HELD:
+        _HELD += 1
+        try:
+            yield
+        finally:
+            _HELD -= 1
+        return
 
     deadline = time.monotonic() + timeout
     handles = [open(p, "a+") for p in _slot_paths()]
@@ -61,8 +84,10 @@ def hold(label: str = "", timeout: float = 3600.0, poll: float = 2.0):
             held.truncate()
             held.write(f"pid={os.getpid()} {label}\n")
             held.flush()
+            _HELD = 1
             yield
         finally:
+            _HELD = 0
             fcntl.flock(held, fcntl.LOCK_UN)
     finally:
         for fh in handles:
