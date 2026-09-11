@@ -80,7 +80,7 @@ A module holds one or more code sections. A section is:
 ```
 
 **The length value N counts marker + statements + terminator — everything except the length
-field itself.** Established 2026-08-23 by fresh oracle compiles of 1/2/3-statement programs
+field itself.** Established by fresh oracle compiles of 1/2/3-statement programs
 (N = 18/33/50 = 3 + Σstmt for 15-byte `? 'one'`-shaped statements) and by `listener.vcx`
 `fxabstract` (single 87-byte method, N = 1 + 87 + 2 = 90).
 
@@ -149,7 +149,7 @@ Two kinds of line are stored as raw source text instead of compiled, sharing one
 | Marker | Kind | Evidence |
 |---|---|---|
 | `01` | Macro-substitution lines (`&var`) — not compiled by design | oracle + corpus; `? &x` → `08 00 \| 01 3f 20 26 78 0a` |
-| `b4` | Lines the compiler REJECTED — measured 2026-08-23: a PRG whose SELECT contains a syntax error still emits an `.fxp`; the `.err` records the error and the offending line is stored verbatim | oracle probe + YiFeiERP `mainmenur.scx`, whose shipped source contains literal `????????` runs preserved byte-exactly in OBJCODE while the `.err` echo strips them to spaces |
+| `b4` | Lines the compiler REJECTED — measured: a PRG whose SELECT contains a syntax error still emits an `.fxp`; the `.err` records the error and the offending line is stored verbatim | oracle probe + YiFeiERP `mainmenur.scx`, whose shipped source contains literal `????????` runs preserved byte-exactly in OBJCODE while the `.err` echo strips them to spaces |
 
 For the decompiler both are free fidelity: the original bytes return exactly. For the migrator,
 `01` lines have no static content to translate, and `b4` lines mark code that never compiled in
@@ -202,11 +202,11 @@ Hand-verified opcodes:
 | `ea <u8>` | escape prefix into the second function range |
 
 `build/coverage.json` holds ~157 more attributed by differential probing, **but that table is not
-trustworthy yet** — it contains operand bytes misattributed as opcodes (§7). Treat it as a lead
+trustworthy** — it contains operand bytes misattributed as opcodes (§7). Treat it as a lead
 list, not a reference.
 ### Folded zero-argument builtin calls collide with int32 literals
 
-Measured 2026-08-23 (`fn_LINENO` roundtrip failure): some parameterless builtins fold at compile
+Measured (`fn_LINENO` roundtrip failure): some parameterless builtins fold at compile
 time to their current value, producing an `e9`-framed constant byte-inseparable from a large
 int32 literal by opcode alone:
 
@@ -215,9 +215,9 @@ int32 literal by opcode alone:
 | `x = 1000000` | `e9 07 40 42 0f 00` | digits `07` = `len("1000000")`; u32 LE = 1000000 |
 | `x = LINENO()` | `e9 0a 01 00 00 00` | digits byte `0a` carries the FUNCTION escape number; u32 = folded line number (1) |
 
-**Corrected 2026-08-26 (round-37 oracle lane, C01/C02 — this supersedes the earlier
-"a real literal's digits byte always equals `len(str(value))`" claim, which hex spellings
-refute).** The measured digit law for `e9 <D> <u32>` literals is:
+The measured digit law for `e9 <D> <u32>` literals (round-37 oracle lane, C01/C02; hex
+spellings refute the simpler reading that a real literal's digits byte always equals
+`len(str(value))`):
 
 | authored spelling | digits byte D |
 |---|---|
@@ -228,7 +228,7 @@ refute).** The measured digit law for `e9 <D> <u32>` literals is:
 Where two readings coincide — exactly when **`hexdigit_count + 1 == len(str(value))`**, which reaches far
 beyond the all-nibble examples 15, 255, 4095, 65535 into whole bands such as 10–15, 100–255, 1000–4095,
 10000–65535 — the wire cannot distinguish authorship **only when the value itself needs the e9
-opcode** (|v| > 32767). **Corrected 2026-09-04 (round 65, r65-hexlit).** r48-intlit and r65-hexlit
+opcode** (|v| > 32767). r48-intlit and r65-hexlit
 compiled hexadecimal and decimal of the same 16-bit values: the opcode is the narrowest that holds
 the value (255 and below ride `f8`, 256..32767 ride `f9`, 32768 and above ride `e9`), so a hex
 token of a 16-bit value never rides e9 (`0x0000002a` → `f8 0a 2a`, `0x000002c2` → `f9 0a c202`).
@@ -236,7 +236,7 @@ A stored `e9 0a <u32>` whose payload fits f8/f9 is therefore not a hex token eve
 byte `0x0a` is also the zero-padded-hex token length of a ten-character token. It is LINENO():
 `x = LINENO()` at line 2 is `e9 0a 02 00 00 00`, and `x = ABS(LINENO())` folds the same way.
 Emitting `0x000000NN` for that frame recompiles to f8/f9 (the `e9->f8` / `e9->f9` cluster). The
-reader emits `LINENO()`. **Corrected 2026-09-04 (round 67, r67-lineno).** The stored u32 is the
+reader emits `LINENO()`. The stored u32 is the
 physical line VFP counted, and the form decides which space:
 
 | form | counting base (oracle r67-lineno) |
@@ -359,13 +359,12 @@ projects): H = project-header pseudo-record (always record 0), d = database
 **MAINPROG is a plain logical column** (T/F bytes). Setting it on one record -
 no UI involved - designates the build entry point, which is what makes a
 generated project buildable headlessly via BUILD APP ... FROM ... RECOMPILE.
-This is load-bearing for phases 5 and 6: generated projects must emit exactly
-one MAINPROG=.T. row.
+Generated projects must emit exactly one MAINPROG=.T. row.
 
 **TIMESTAMP N(10) is a DOS-packed local datetime**
 `((yy-1980)<<25 | mm<<21 | dd<<16 | hh<<11 | mi<<5 | ss/2)` with even
 seconds. A member whose TIMESTAMP matches its source file mtime is fresh:
-BUILD APP skips that compile. Measured 2026-08-29 against builder bytes:
+BUILD APP skips that compile. Measured against builder bytes:
 1562204634 = 11:14:52; 1562206208 = 12:00:00. The builder's own TIMESTAMP
 for a given mtime is the value to write — a naive pack of 12:00:00 was
 1562206208, the builder wrote 1562206209 for the same guest LastWriteTime.

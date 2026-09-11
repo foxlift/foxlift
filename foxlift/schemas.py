@@ -569,6 +569,30 @@ CREATE_BANK = _prod.Bank(
                      word="STEP %(step)s", order=32,
                      after=("nextvalue",),
                      refusal="CREATE CURSOR AUTOINC shape"),
+        # r88-tailbd (226 generated rows): NOCPTRANS is a bare `bd` behind
+        # the field, on every measured type letter (M, C, I), at every list
+        # position, under both verbs. VFP9 canonicalises both source orders
+        # to the nullability first (`M NOT NULL NOCPTRANS` and
+        # `M NOCPTRANS NOT NULL` compile to the same bytes), so the word
+        # rides behind the nullable slot. Its order against the AUTOINC
+        # chain is unmeasured — no matrix row carries both — so it sits
+        # after `step` and moves if a later matrix says otherwise.
+        _prod.Clause(key="nocptrans", scope=CREATE_FIELD, marks=(0xBD,),
+                     word="NOCPTRANS", order=33),
+        # r88-tail0e (252 generated rows): DEFAULT is `0e` plus a group
+        # holding one expression — a literal, NULL, an arithmetic fold, a
+        # memvar or a call (`SYS(2015)` compiles to the corpus's own
+        # `0e fc 43 f904df07 5d fd`) — behind any field shape, sized or
+        # not, at every list position, under both verbs. Both source
+        # orders canonicalise to the nullability first. A bare DEFAULT
+        # with no operand is a compiler refusal. Its order against the
+        # AUTOINC chain and the NOCPTRANS row is unmeasured — no matrix
+        # row carries both — so it sits after them and moves if a later
+        # matrix says otherwise.
+        _prod.Clause(key="default", scope=CREATE_FIELD, marks=(0x0E,),
+                     operand=_prod.GROUP, word="DEFAULT %(default)s",
+                     order=34,
+                     refusal="CREATE CURSOR DEFAULT value unresolved"),
     ),
 )
 
@@ -1794,7 +1818,18 @@ MEASURED_LOCAL_GROUP_CLOSERS = {
     # turn that into an honest refusal at the cost of one SGFOX section, and
     # this lane holds to no-lift-regression: settling it is the two-subscript
     # element read, not the table.
+    #
+    # r87-nestedelem lands it. Round 87 law 1 reads the nested element with
+    # the chain as its receiver, so the fabrication is gone: the carrier
+    # lifts the single-subscript read and no two-push `0x40` packet remains
+    # anywhere the census reaches. Round 80's `narrow2` procedure re-run
+    # verbatim against the landed arm (`round87_lower_gates.json`, verdict
+    # `land`) is identity-quiet — the sweep (1, 1) frame lifts both ways,
+    # the two-operand frame refuses on the arity gate both ways, no class
+    # moves, no repository below the control, lift unchanged. Name from
+    # BARE_IDS; the generated registry's arity stays "?".
     0xA1: (1, 1),  # EMPTY
+    0x40: (1, 1),  # LOWER
 }
 if not set(MEASURED_LOCAL_GROUP_CLOSERS) <= BUILTIN_BARE.keys():
     raise AssertionError("local-arity bare closer missing from measured registry")
@@ -1994,6 +2029,12 @@ SYSVAR_READ = 0xED
 # such system variables — which is what makes the sweep self-verifying: no row of
 # it rests on a compile that failed. The gaps (0x2c-0x2e, 0x4a-0x4c, 0x4f-0x51,
 # 0x53) are ids no name in the language reaches and they stay unmapped.
+# r86-ed extends five of those gaps by the same method (round86_ed_streams.json,
+# 27 programs, PUT + value + STORE rows each): 0x50 _INCSEEK, 0x51 _PAGETOTAL,
+# 0x53 _TOOLBOX, 0x58 _MENUDESIGNER, 0x59 _TOOLTIPTIMEOUT — every one rides
+# `ed <id>` on all three channels, every previously-mapped id confirmed
+# unchanged. The remaining gaps (0x2c-0x2e, 0x4a-0x4c, 0x4f, and past 0x59)
+# stay unmapped: 60 further candidate names all rode the `f7` memvar channel.
 SYSTEM_VARS = {
     0x00: "_ALIGNMENT", 0x01: "_BOX", 0x02: "_INDENT", 0x03: "_LMARGIN",
     0x04: "_PADVANCE", 0x05: "_PAGENO", 0x06: "_PBPAGE", 0x07: "_PCOLNO",
@@ -2014,8 +2055,10 @@ SYSTEM_VARS = {
     0x41: "_SCCTEXT", 0x42: "_COVERAGE", 0x43: "_VFP", 0x44: "_GALLERY",
     0x45: "_GETEXPR", 0x46: "_INCLUDE", 0x47: "_GENHTML",
     0x48: "_RUNACTIVEDOC", 0x49: "_SAMPLES", 0x4D: "_FOXCODE",
-    0x4E: "_FOXTASK", 0x52: "_FOXREF", 0x54: "_TASKPANE",
+    0x4E: "_FOXTASK", 0x50: "_INCSEEK", 0x51: "_PAGETOTAL",
+    0x52: "_FOXREF", 0x53: "_TOOLBOX", 0x54: "_TASKPANE",
     0x55: "_REPORTBUILDER", 0x56: "_REPORTPREVIEW", 0x57: "_REPORTOUTPUT",
+    0x58: "_MENUDESIGNER", 0x59: "_TOOLTIPTIMEOUT",
 }
 WORKAREA_REF = 0xF5 # f5 <id>: 0D = memory-variable reference (m.<name>, next token MUST
                      # be f7 <sym>; forced 235/235 against stored sources); 01-0A = the

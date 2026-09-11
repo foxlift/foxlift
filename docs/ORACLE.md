@@ -26,6 +26,7 @@ in a UTM QEMU VM on the Mac.
 |---|---|
 | VM | UTM VM named `Windows` — `utmctl start Windows` |
 | Reach | `ssh -i <your-key> oracle@<vm-ip>` (UTM shared network) |
+| Address | `FOXLIFT_ORACLE_VM=user@host` in the environment; the research tree keeps it in a gitignored `.env` |
 | VFP | `C:\Program Files (x86)\Microsoft Visual FoxPro 9\vfp9.exe` |
 | Host dir | `~/vfp9-oracle/` — media, keys, `STATE.md`, shell drivers |
 
@@ -108,8 +109,8 @@ output. Pass `lock=False` down to helpers when the outer frame already holds it.
 **SSH-launched processes land in session 0 — no interactive desktop.** Detached
 `Start-Process`, blocking `-Wait`, WMI `Win32_Process.Create`, and scheduled tasks as SYSTEM
 all run there. If a run needs a real desktop (dialogs, COM automation that renders), schedule a
-task as the logged-on user in session 1 instead. On 2026-08-23 an unattended guest stuck at the
-lock screen plus a half-applied Windows update produced hours of "vfp9 starts but executes no
+task as the logged-on user in session 1 instead. An unattended guest stuck at the lock screen
+with a half-applied Windows update once produced hours of "vfp9 starts but executes no
 driver" that survived reboots; it cleared only after updates finished AND an interactive login
 existed. When the oracle behaves strangely, check
 `query session` for an active console session before debugging anything else.
@@ -123,10 +124,9 @@ destroys minimal-pair diffs. `corpus.py` names everything `s%04d.prg` for this r
 
 **GBK unquoted identifiers need the guest ACP to be 936.** `SET CODEPAGE TO 936`,
 `SET CPCOMPILE TO 936`, and `COMPILE AS 936` do not parse DBCS identifiers while
-the OS ANSI code page is 1252 (measured 2026-08-23, probes/codepage/; still true
-as VFP-level knobs). On 2026-08-28 the guest system locale was set
-`Set-WinSystemLocale zh-CN` (ACP/OEMCP registry 936, reboot). After that,
-unquoted GBK identifiers compile. `Language.Basic~~~zh-CN` is installed;
+the OS ANSI code page is 1252 (measured in probes/codepage/). The guest system locale
+is set with `Set-WinSystemLocale zh-CN` (ACP/OEMCP registry 936, reboot), and with
+that unquoted GBK identifiers compile. `Language.Basic~~~zh-CN` is installed;
 `Install-Language zh-CN` as a full pack was only partial and is not required
 for ACP. Do not flip ACP back to 1252 to “fix” an English compile — GBK is
 ASCII-compatible below 0x80.
@@ -136,8 +136,9 @@ ASCII-compatible below 0x80.
 
 **Output comes back uppercase.** The guest writes `.FXP`/`.ERR`; index case-insensitively.
 
-**Only standalone PRGs are compiled today.** `compile_dir` handles `*.prg`. Scoring against real
-form/class methods needs a method-compilation path — see below.
+**`compile_dir` compiles standalone PRGs.** Method sections are scored through the `DEFINE CLASS`
+wrapper below. Reconstructed `.scx`/`.vcx` records are compiled by `COMPILE FORM` and `COMPILE
+CLASSLIB` guest drivers in `probes/oracle_harvest/` (the table path).
 
 ## Method compilation
 
@@ -164,7 +165,7 @@ Neither PRG-versus-VCX storage nor the differing base class changed the instruct
 `_base.vcx` corroborates: 35 objects sharing a `METHODS` memo share one byte-identical `OBJCODE`
 despite different base classes.
 
-**Matrix result, 2026-08-23 (`probes/context_matrix/`): the wrapper is ACCEPTED for scoring.**
+**Matrix result (`probes/context_matrix/`): the wrapper is ACCEPTED for scoring.**
 All six construct families probed (local-only, `THIS.member`, `THISFORM.member`, `WITH`,
 local-shadowing-property, LPARAMETERS+THIS) produce byte-identical framed statement streams
 across standalone PRG, `DEFINE CLASS … AS Custom`, `… AS Label` and `… AS Form`; the ctl32
@@ -188,7 +189,7 @@ VFP has `COMPILE FORM` and `COMPILE CLASSLIB` if the wrapper turns out not to ho
   Running `vs_setup.msi` directly fails 1603 on a launch condition, and the `setup.exe`
   bootstrapper hangs headless in session 0. Then apply `VFP9_sp2.exe /q`.
 
-## Measured throughput and two negative results (2026-08-23)
+## Measured throughput and two negative results
 
 Cost model, measured with identical batches before and after a config change:
 
@@ -209,7 +210,7 @@ with RAM 4 GB → 12 GB and 8 vCPUs, moved the marginal cost 0.521s → 0.514s p
 0.5s/file is the emulation floor and is not reachable by host tuning. Only a real x86 machine
 removes it.
 
-**Negative result — vfp9 does NOT need an interactive desktop session.** During the afternoon
+**Negative result — vfp9 does NOT need an interactive desktop session.** During one
 outage the guest sat at the lock screen with no `explorer.exe` and console session 1 unoccupied,
 which looked like a strong explanation for driver programs never executing. It was not: after the
 update-reboot the oracle compiles normally with session 1 still showing no username. The outage is

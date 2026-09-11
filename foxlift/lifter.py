@@ -387,6 +387,7 @@ class DoStmt:
     in_target: object = None
     name_target: object = None
     flags: list = field(default_factory=list)
+    with_first: bool = False  # r89-dowith: author spelled WITH before TO
 
 
 @dataclass
@@ -401,11 +402,12 @@ class SkipStmt:
 
 @dataclass
 class ScopeRef:
-    """df [f4 hop]* e3 <class> (f7 <member> | f6 <method>).
+    """df [f4 hop]* e3 <class> ([f4 <c>]* f7 <member> | [f4 <c>]* f6 <method>).
 
     Property form is `Class::Member` (f7). Method form is `Class::Method(args)`
     (f6); arguments stand on the 43-group stack in front of df. Hops are a
-    dotted prefix (`THIS.Custom::Init`).
+    dotted prefix (`THIS.Custom::Init`); a member run behind the class rides
+    dotted inside `member` (`C1::Name.Sub`).
     """
     cls: str
     member: str
@@ -1138,10 +1140,14 @@ class UseStmt:
     (iter. 36, 'USE LU3 IN 0 EXCLUSIVE' aligned) plus the corpus-aligned mode flags
     SHARED/NOUPDATE, post-name AGAIN and an ALIAS symbol operand
     ('USE (THIS.CommandClauses.File) AGAIN SHARED NOUPDATE ALIAS FRX',
-    _reportlistener.vcx::fxlistener s38)."""
+    _reportlistener.vcx::fxlistener s38), and the trailing INDEX file list,
+    ORDER tag forms and ONLINE (r89-usetrail). The source may spell
+    ORDER ahead of ALIAS; the wire keeps ALIAS first either way and the
+    decoder recovers the source order from the table (order_first)."""
     def __init__(self, name=None, in_area=None, exclusive=False,
                  shared=False, noupdate=False, again=False, alias=None,
-                 norequery=False, nodata=False, order=None):
+                 norequery=False, nodata=False, order=None,
+                 index=None, online=False, order_first=False):
         self.name = name
         self.in_area = in_area
         self.exclusive = exclusive
@@ -1149,9 +1155,12 @@ class UseStmt:
         self.norequery = norequery
         self.nodata = nodata
         self.order = order
+        self.index = index
+        self.online = online
         self.noupdate = noupdate
         self.again = again
         self.alias = alias
+        self.order_first = order_first
 
 
 @dataclass
@@ -1377,6 +1386,10 @@ class DoCase:
     # words are EQUAL declares no clause region; only complete nested frames sit
     # between it and its own ENDCASE, walked into this body (None = normal form).
     body: list | None = None
+    # r89-docase: stray statements the opener's t_first skips — the workarea
+    # SELECT, assignment and LOCAL the oracle keeps in-frame ahead of the
+    # first CASE (each decoded by its shipped arm at walk time).
+    strays: list = field(default_factory=list)
 
 
 @dataclass
@@ -2159,6 +2172,61 @@ def _table_new_index(syms, name):
     return hits[0]
 
 
+def _use_order_first(syms, alias_idx, order_tag, name=None) -> bool:
+    """Whether the author spelled USE's ORDER ahead of its ALIAS.
+
+    The wire keeps ALIAS in front of ORDER either way, but VFP9 numbers
+    a section's symbol table in source order (oracle r89-usetrail: an
+    ALIAS-first emission of an ORDER-first source recompiles to a shifted
+    table), so the table tells which order the author wrote: ORDER-first
+    exactly when the ORDER tag stands ahead of the ALIAS symbol. A tag or
+    alias anchored by an earlier line keeps its index whatever this
+    statement spells, so then either emission recompiles the same table
+    and the canonical ALIAS-first order stands. Anything unresolvable —
+    a grouped tag, a non-symbol alias, no tag — keeps it too. The tag
+    echoing the string table name re-sights a symbol the name already
+    interned (oracle r89-usetrail `ord_desc`, ALIAS-first over a tag
+    the name owns), so a name-echo keeps the canonical order as well.
+    """
+    if alias_idx is None or not isinstance(order_tag, str) or not order_tag:
+        return False
+    want = order_tag.upper()
+    if isinstance(name, str) and name.upper() == want:
+        return False
+    hits = [i for i, s in enumerate(syms)
+            if isinstance(s, str) and s.upper() == want]
+    if len(hits) != 1:
+        return False
+    return hits[0] < alias_idx
+
+
+def _update_from_first(syms, table, src, col_idxs) -> bool:
+    """Whether the author spelled UPDATE's FROM ahead of its SET list.
+
+    The wire keeps FROM in front of SET either way, but VFP9 numbers a
+    section's symbol table in source order (oracle r89-updateset: a
+    SET-first emission of a FROM-first source recompiles to a shifted
+    table), so the table tells which order the author wrote: FROM-first
+    exactly when the FROM source stands ahead of the SET columns' max.
+    A FROM that names the updated table itself is statement-head
+    anchored in both orders and carries no information, and a symbol
+    anchored by an earlier line keeps its index whatever this statement
+    spells, so in both cases either emission recompiles the same table
+    and the canonical SET-first order stands. Anything unresolvable
+    keeps it too.
+    """
+    if not isinstance(src, str) or not src or not col_idxs:
+        return False
+    if isinstance(table, str) and table and src.upper() == table.upper():
+        return False
+    want = src.upper()
+    hits = [i for i, s in enumerate(syms)
+            if isinstance(s, str) and s.upper() == want]
+    if len(hits) != 1:
+        return False
+    return hits[0] < max(col_idxs)
+
+
 def _sym(syms, idx):
     if idx >= len(syms):
         raise Unsupported(f"symbol index {idx} beyond table ({len(syms)})")
@@ -2262,6 +2330,10 @@ _GROUP_DEPTH = 0              # live 43-group frames (the packet-nesting test
 _PACKET_NONE = 0
 _PACKET_INSIDE_FIRST = 1      # inside the group a doubled opener produced
 _PACKET_OPENS_FIRST = 2       # this is a group's FIRST segment: a 43 doubles
+_PACKET_SINGLE_NONFIRST = 4   # this segment sits in a single-opener non-first
+                              # packet: an element packet, never a call packet
+                              # (r87-sibling: a nested call doubles its opener
+                              # even off-first — LEN's 3e, ALLTRIM's 9b)
 _ARG_BYREF_CLOSE = False     # r38 M3/a0004: an 18 flag rode immediately before
                              # the f6 that closes the enclosing nested group
                              # ('@arr(sub)' — subscript already pushed). Set by
@@ -2374,6 +2446,38 @@ def _arena_fallback(stack):
         if fb is not stack and fb:
             return fb
     return None
+
+
+# Round-86 law 3 (e0 member tail): node types that can never be a genuine
+# element subscript. The `e5` arm pops exactly one node as the subscript, so
+# a structural node there is the receiver misread (`o.arr[1]` compiles
+# `43 <subs> f4<O> e5<ARR>` — the `f4` ahead of the `e5` names the receiver,
+# which the arm takes for the subscript and strands the real subscriptage
+# below). The fold below declines those and the historical refusal stands,
+# instead of emitting a chain that drops the receiver.
+_E0_TAIL_STRUCTURAL_SUBS = (MemberRef, MemberPath, WithMemberPath, MidCall,
+                            MethodCall, ObjectChain, ChainRecv, ArrayElement,
+                            IndexedElemRef, ScopeRef)
+
+
+def _elem_e0_receiver(stack):
+    """The stranded bare element below an `e0` tail, or None.
+
+    Exactly `ArrayElement` with the `e5` arm's `method_receiver` mark, no hop
+    run of its own (an `f6`-method receiver carries its hops and keeps its
+    message), a plain symbol base and value-only subscripts — the measured
+    `43 <subs> e5 <arr> [f4 <hop>]* e0 <member>` run an array builtin
+    compiles for an element-hop chain argument.
+    """
+    if not stack or not isinstance(stack[-1], ArrayElement):
+        return None
+    elem = stack[-1]
+    if not elem.method_receiver or elem.hops \
+            or not isinstance(elem.base, Sym):
+        return None
+    if any(isinstance(s, _E0_TAIL_STRUCTURAL_SUBS) for s in elem.subs):
+        return None
+    return elem
 
 
 def _dec_expr(buf, i, end, syms, stop_at_one=False, stop_bytes=frozenset(),
@@ -2635,6 +2739,27 @@ def _dec_expr_run(buf, i, end, syms, stack, stop_at_one=False,
                 if "member path without terminal property" not in str(e):
                     raise
                 node, i = _dec_object_chain(buf, i, end, syms)
+            if isinstance(node, MemberPath) and not node.receiver \
+                    and i >= 3 and buf[i - 3] == 0xE0 and len(stack) >= 1:
+                # r86-e0: the hop run's `e0` terminal just closed on this
+                # path (token-aligned, so the byte behind is the token
+                # itself, never a coinciding operand). When the value below
+                # is the stranded bare element, the tail belongs on it.
+                elem = _elem_e0_receiver(stack)
+                if elem is not None:
+                    stack.pop()
+                    node = IndexedElemRef(
+                        elem.base.name, list(elem.subs), prop=node.names[-1],
+                        bracket=True, hops=tuple(node.names[:-1]))
+                elif isinstance(stack[-1], MidCall) \
+                        and stack[-1].recv == [""] \
+                        and stack[-1].prop is None:
+                    # r86-e0: the WITH-scoped twin — the element below is
+                    # the prop-less `MidCall` the `e2` handler left, and the
+                    # tail rides the chain the round-78 `f7` twin carries.
+                    mc = stack.pop()
+                    node = ObjectChain([""], [(mc.name, list(mc.args))],
+                                       list(node.names))
             stack.append(node)
         elif op == S.WITHREF:
             hops = []
@@ -2804,6 +2929,30 @@ def _dec_expr_run(buf, i, end, syms, stack, stop_at_one=False,
             if i + 3 > end:
                 raise Unsupported("array-member token truncated")
             nm = _sym(syms, S.u16(buf, i + 1))
+            elem = _elem_e0_receiver(stack)
+            if elem is not None:
+                # r86-e0: `43 <subs> e5 <arr> e0 <member>` — the element-hop
+                # chain with no hop run carries the tail on the element node
+                # itself, which is what the emitter refuses. The bracket
+                # spelling rides the node's own provenance: the producer
+                # writes no closer on this run and both spellings recompile
+                # to it, measured byte-identical.
+                stack.pop()
+                stack.append(IndexedElemRef(
+                    elem.base.name, list(elem.subs), prop=nm, bracket=True))
+                i += 3
+                continue
+            if stack and isinstance(stack[-1], MidCall) \
+                    and stack[-1].recv == [""] and stack[-1].prop is None:
+                # r86-e0: the WITH-scoped twin — `e2 e5 <arr> e0 <member>`
+                # leaves the element as a prop-less `MidCall`, which the
+                # stock arm would split into two call arguments. The tail
+                # rides the chain the way the round-78 `f7` twin carries it.
+                mc = stack.pop()
+                stack.append(ObjectChain([""], [(mc.name, list(mc.args))],
+                                         [nm]))
+                i += 3
+                continue
             if stack and isinstance(stack[-1], MemberRef):
                 stack.append(MemberPath([stack.pop().name, nm]))
             elif stack and isinstance(stack[-1], MemberPath):
@@ -2828,6 +2977,13 @@ def _dec_expr_run(buf, i, end, syms, stack, stop_at_one=False,
             # arguments already on this segment's stack). Oracle r73-scope:
             # C1::Name -> df e3 f7; C1::M1() -> 43 df e3 f6; C1::M1(1) ->
             # 43 f8 1 df e3 f6; THIS.Custom::Init() -> 43 df f4 e3 f6.
+            # r85-scopemember: behind the class the producer writes the same
+            # member run every other receiver carries — `[f4 <c>]+ f7 <last>`
+            # for a property path (`v = C1::Name.Sub` is
+            # `54 f7<V> 10 fc df e3 f4 f7`), `f6` for the method tail
+            # (`C1::Name.Sub()` is `df e3 f4 f6` inside its 43 group). The
+            # run is read exactly there; any other follower keeps
+            # `scope-ref shape`.
             j = i + 1
             hops = []
             while j + 3 <= end and buf[j] == S.MEMBER:
@@ -2837,15 +2993,23 @@ def _dec_expr_run(buf, i, end, syms, stack, stop_at_one=False,
                 raise Unsupported("scope-ref shape")
             cls = _sym(syms, S.u16(buf, j + 1))
             j += 3
+            path = []
+            while j + 3 <= end and buf[j] == S.MEMBER:
+                path.append(_sym(syms, S.u16(buf, j + 1)))
+                j += 3
             if j + 3 > end:
                 raise Unsupported("scope-ref shape")
             if buf[j] == S.SYM:
                 member = _sym(syms, S.u16(buf, j + 1))
+                if path:
+                    member = ".".join(path + [member])
                 stack.append(ScopeRef(cls, member, hops=tuple(hops)))
                 i = j + 3
                 continue
             if buf[j] == S.NAME:
                 member = _sym(syms, S.u16(buf, j + 1))
+                if path:
+                    member = ".".join(path + [member])
                 args = list(stack)
                 stack.clear()
                 node = ScopeRef(cls, member, hops=tuple(hops), args=args)
@@ -2861,18 +3025,50 @@ def _dec_expr_run(buf, i, end, syms, stack, stop_at_one=False,
             if i + 3 > end:
                 raise Unsupported("array-element receiver truncated")
             sub = stack.pop()
+            extra = []
+            if _GROUP_DEPTH >= 2 and stack and i + 3 < end \
+                    and not isinstance(sub, MemberRef) \
+                    and not _is_with_chain_operand(sub) \
+                    and not any(_is_with_chain_operand(v) for v in stack):
+                # r85-twosub: inside a nested 43 packet every push is the
+                # element's own subscriptage (oracle r85-twosub: an argument
+                # packet nests both pushes — `43 43 f8 f8 e5 …`). Flat call
+                # packets (depth 1) keep pop-one — their pushes are the
+                # callee's (`MAX(arr[1].p, 2)` proves it) — and the
+                # implicit-close fold below covers flat packets with no
+                # callee. The receiver spelling (MemberRef sub) keeps the
+                # stock stack: W15 reads its operand below itself. A
+                # WITH-chain operand (a round-28 W3 value, as the popped
+                # subscript or below it) is the chain's open operand, never
+                # subscriptage: swallowing one re-emits the nested read
+                # `e2 e5<M> e5<N>` as a bare two-subscript call, which
+                # recompiles `e5 e5` to `f6` (outlookmail.vcx rec 1) — so
+                # the stock pop-one reading stands there.
+                extra = list(stack)
+                del stack[:]
             if member_callee_tail:
                 # round39 W15: in a segment the element read may carry the
                 # property tail that belongs to IT — attach, never detach.
-                attached = _dec_w15_elem_prop_tail(buf, i, end, syms,
-                                                   stack, sub,
-                                                   seg_start=seg_start)
+                try:
+                    attached = _dec_w15_elem_prop_tail(buf, i, end, syms,
+                                                       stack, sub,
+                                                       seg_start=seg_start,
+                                                       packet=packet)
+                except _GroupDone as gd:
+                    if extra and isinstance(gd.node, (IndexedElemRef,
+                                                      ArrayElement)):
+                        gd.node.subs[0:0] = extra
+                    raise
                 if attached is not None:
+                    if extra and isinstance(attached[0], (IndexedElemRef,
+                                                          ArrayElement)):
+                        attached[0].subs[0:0] = extra
                     stack.append(attached[0])
                     i = attached[1]
                     continue
             stack.append(ArrayElement(
-                Sym(_sym(syms, S.u16(buf, i + 1))), [sub], method_receiver=True))
+                Sym(_sym(syms, S.u16(buf, i + 1))), extra + [sub],
+                method_receiver=True))
             i += 3
             continue
         elif op == 0xE1:
@@ -2887,6 +3083,10 @@ def _dec_expr_run(buf, i, end, syms, stack, stop_at_one=False,
             #   four hops  'm.loImgFormat = _SCREEN.SYSTEM.Drawing.Imaging.
             #              ImageFormat.Bmp' (chartadjust.scx::CmdSave s0, corpus
             #              alignment; five aligned statements BMP/Jpeg/Gif/Png/Tiff)
+            #   element    '_SCREEN.arr[1].mbr' as a bare statement is
+            #              'e1 39 e5<ARR> fc <sub> fd <closer> f7<MBR>' (oracle
+            #              r85-sysrootelem) — the target spelling, read here
+            #              through the 99e1 routing only.
             # Bare sysvar reads are NOT e1-encoded (_cliptext -> ed 1d; oracle
             # round-21 REFUTED the bare-read prediction; round-27 s8 binds bare
             # `_SCREEN` as ed 39), so a bare opener, an id outside
@@ -2918,6 +3118,33 @@ def _dec_expr_run(buf, i, end, syms, stack, stop_at_one=False,
                 # f7] and closes the enclosing group with the completed value
                 # (_GroupDone); it never returns.
                 _dec_args_first_call(buf, j, end, syms, stack, names)
+            elif not member_callee_tail and j + 4 <= end \
+                    and buf[j] == S.ARRAY_ELEM_CALL and buf[j + 3] == S.FC \
+                    and not stack and buf[0] == S.EXPRSTMT_BARE:
+                # r85-sysrootelem: an element under the root in the
+                # bare-statement routing (`99 e1 <id> [f4 hop]* e5 <arr>
+                # fc <sub> fd <closer> …`) — the target spelling, read by
+                # the value reader. Re-enter the element arm so there is
+                # ONE element grammar (round 78 law 3's twin), prefixing
+                # the root run onto its base exactly as the lvalue arm
+                # does. Gated to a bare statement with nothing on the
+                # stack: the producer never emits this spelling inside a
+                # value window (there it pushes the subscripts ahead of
+                # the root — the pivot path above), so anywhere else the
+                # bytes keep `system-object reference form`. An
+                # out-of-range array symbol keeps it too, and the segment
+                # (pivot) path above is untouched.
+                if S.u16(buf, j + 1) >= len(syms):
+                    raise Unsupported("system-object reference form")
+                node, j2 = _dec_lvalue(buf, j, end, syms)
+                if isinstance(node, IndexedElemRef):
+                    stack.append(IndexedElemRef(
+                        ".".join(names + [node.base]), node.subs,
+                        prop=node.prop, bracket=node.bracket,
+                        hops=node.hops))
+                    i = j2
+                else:
+                    raise Unsupported("system-object reference form")
             else:
                 raise Unsupported("system-object reference form")
         elif op == S.SYSVAR_READ:
@@ -3754,6 +3981,69 @@ def _dec_array_elem_call(buf, i, end, syms):
     return MethodCall([ArrayRef(name, subs, bracket=True)] + hops, method, args)
 
 
+def _dec_sysroot_elem_call(buf, i, end, syms):
+    """`e1 <id> e5 <arr> <subs> fd [f4 <hop>] f6 <M> <args> fd`, bare to end.
+
+    r87-methtail: a bare statement whose receiver is an element under a
+    system-object root with a method tail carrying arguments. The no-arg
+    tail already reads (the 43 packet), the property tail already reads
+    (the value side's element arm), and the lvalue twin already reads
+    (the assign arm); only this with-args method tail is unmeasured —
+    the read side stops at the first `f6` (`bare array/function
+    reference outside its wrapper`) and the statement side misframes it
+    (`symbol index beyond table`). Measured on the oracle for both
+    roots, paren and bracket subscripts, hop and direct tails, and
+    literal, memvar, property and logical arguments
+    (round87_methtail_streams.json). One `fc <expr> fd` unit per side
+    with the source's own closer, at most one hop, statement-final;
+    every other byte declines (None) so every other bare statement keeps
+    its own reader.
+    """
+    t = i
+    if t + 2 > end or buf[t] != 0xE1 \
+            or buf[t + 1] not in S.SYSTEM_OBJECT_REFS:
+        return None
+    root = S.SYSTEM_OBJECT_REFS[buf[t + 1]]
+    t += 2
+    if t + 3 > end or buf[t] != S.ARRAY_ELEM_CALL:
+        return None
+    if S.u16(buf, t + 1) >= len(syms):
+        return None
+    arr = _sym(syms, S.u16(buf, t + 1))
+    t += 3
+
+    def _unit(t):
+        if t >= end or buf[t] != S.FC:
+            return None, t
+        es, k = _dec_expr(buf, t + 1, end, syms, stop_bytes=_IF_COND_STOP)
+        if len(es) != 1 or k + 1 >= end or buf[k] != S.FD \
+                or buf[k + 1] not in (S.PAREN, 0x16):
+            return None, t
+        return (es[0], buf[k + 1] == 0x16), k + 2
+
+    sub, t = _unit(t)
+    if sub is None:
+        return None
+    hops = []
+    if t + 3 <= end and buf[t] == S.MEMBER:
+        if S.u16(buf, t + 1) >= len(syms):
+            return None
+        hops.append(_sym(syms, S.u16(buf, t + 1)))
+        t += 3
+    if t + 3 > end or buf[t] != S.NAME:
+        return None
+    if S.u16(buf, t + 1) >= len(syms):
+        return None
+    method = _sym(syms, S.u16(buf, t + 1))
+    t += 3
+    arg, t = _unit(t)
+    if arg is None or t != end:
+        return None
+    recv = IndexedElemRef("%s.%s" % (root, arr), [sub[0]],
+                          bracket=sub[1], hops=tuple(hops))
+    return MethodCall([recv], method, [arg[0]])
+
+
 def _typed_extension(name, buf, t, end, syms, what):
     """Typed-parameter extension after a name (round-24 l1 byte-exact vs
     workerchart.scx::Organizationchart1.onnodeclick 'Lparameters to_Node As
@@ -3886,6 +4176,7 @@ def _dec_do_with_list(buf, t, end, syms):
     (string, number, expression, array element, omitted db). Slots join by
     ARGJOIN; the final group's fd may be reader-stripped. An inner _dec_expr
     refusal keeps its own class. A bare @ argument is not on the wire.
+    r89-dowith: an f5 0d memvar slot reads as `m.<name>`.
     Returns (args, t) at end-of-list or at the first clause mark.
     """
     args = []
@@ -3915,6 +4206,16 @@ def _dec_do_with_list(buf, t, end, syms):
             except Unsupported:
                 raise Unsupported("DO WITH argument unwrapped")
             args.append(node)
+        elif buf[t] == S.WORKAREA_REF:
+            # r89-dowith: `DO p WITH m.x` wires `d1 f5 0d f7<x>`. Only the
+            # plain symbol spelling is measured; anything else behind f5 0d
+            # keeps the unwrapped refusal.
+            if t + 5 <= end and buf[t + 1] == 0x0D \
+                    and buf[t + 2] == S.SYM:
+                args.append(Sym("m." + _sym(syms, S.u16(buf, t + 3))))
+                t += 5
+            else:
+                raise Unsupported("DO WITH argument unwrapped")
         elif buf[t] == S.FC:
             try:
                 es, k = _dec_expr(buf, t + 1, end, syms,
@@ -3935,6 +4236,50 @@ def _dec_do_with_list(buf, t, end, syms):
             break
         t += 1
     return args, t
+
+
+def _do_clause_symbols(node):
+    """Symbol names a DO FORM TO target or WITH arg can carry (r89-dowith).
+
+    Only the plain spellings the corpus carries — a bare symbol, a memvar
+    (`m.` prefix stripped on either side), or a member path — take part in
+    the order reading; every other node keeps the canonical TO-first
+    emission.
+    """
+    if isinstance(node, Sym):
+        name = node.name
+        if name.startswith("m."):
+            name = name[2:]
+        return (name,)
+    if isinstance(node, MemvarRef):
+        return (node.name,)
+    if isinstance(node, MemberPath):
+        return tuple(node.names)
+    return ()
+
+
+def _do_with_first(to_target, args, syms):
+    """Whether the author spelled WITH before TO (r89-dowith).
+
+    VFP9 numbers a section's symbol table in source order (oracle
+    r89-dowith order probes: both clause orders compile to the TO-first
+    wire, with the table following the source) and canonicalises both
+    orders to the TO-first wire, so the table tells which order the
+    author wrote: WITH-first exactly when the TO target's symbols stand
+    behind every WITH arg's symbols. A symbol anchored by an earlier line
+    keeps its index whatever this statement spells, so either emission
+    recompiles the same table there and the canonical order stands.
+    """
+    if to_target is None or not args:
+        return False
+    tab = {s: i for i, s in enumerate(syms)}
+    to_syms = _do_clause_symbols(to_target)
+    if not to_syms or any(s not in tab for s in to_syms):
+        return False
+    arg_syms = [s for a in args for s in _do_clause_symbols(a)]
+    if not arg_syms or any(s not in tab for s in arg_syms):
+        return False
+    return max(tab[s] for s in to_syms) > max(tab[s] for s in arg_syms)
 
 
 def _dec_do_in(buf, t, end, syms):
@@ -4183,6 +4528,48 @@ def _bare_scope_dup(buf, j, end):
             and S.u16(buf, k + 1) == S.u16(buf, k + 4))
 
 
+def _bare_scope_multiprop(buf, j, end, syms):
+    """A bare multi-link scope run with a property terminal, statement-final.
+
+    Oracle r87-stmtscop: C1::Name.Sub as a statement is 99 df e3 <cls>
+    f4 <hop> f7 <term> — the value-position run (round 85 law 1) with
+    no statement-side repeat; the doubled terminal is the one-link
+    spelling's alone. A THIS root keeps its hop (THIS.C1::Name.Sub is
+    99 df f4 <hop> e3 <cls> f4 <hop> f7 <term>). Returns True when
+    this stream is exactly such a shape, so the caller can hand the
+    expression reader the frame it already reads in value position.
+    Bounds-checked throughout: an index beyond the table declines, so
+    an out-of-range statement keeps the stock symbol-index refusal
+    byte-identical. Single-link runs (no f4 behind the class — round
+    33's negative gate: the producer writes the repeat for every
+    one-link run it was offered), method tails (f6 — oracle
+    r87-stmtscop: methods ride 99 fc 43 … f6, a bare df … f6 has no
+    producer and keeps its historical misframe), and non-final bytes
+    all decline.
+    """
+    k = j + 1
+    while k + 3 <= end and buf[k] == S.MEMBER:
+        if S.u16(buf, k + 1) >= len(syms):
+            return False
+        k += 3
+    if k + 3 > end or buf[k] != S.SCOPE_CLASS:
+        return False
+    if S.u16(buf, k + 1) >= len(syms):
+        return False
+    k += 3
+    hops = 0
+    while k + 3 <= end and buf[k] == S.MEMBER:
+        if S.u16(buf, k + 1) >= len(syms):
+            return False
+        hops += 1
+        k += 3
+    if hops == 0:
+        return False
+    if k + 3 != end or buf[k] != S.SYM:
+        return False
+    return S.u16(buf, k + 1) < len(syms)
+
+
 def _dec_scope_call_tail(buf, j, end, syms):
     """Bare scope-resolved invocation tail under lead 99 (round 33, lane R33-1):
     `df e3 <cls u16> f7 <mbr u16> f7 <dup u16>` ending EXACTLY at the statement
@@ -4415,7 +4802,8 @@ _W15_PACKET_CLOSE_AHEAD = frozenset((
 ))
 
 
-def _dec_w15_elem_prop_tail(buf, i, end, syms, stack, sub, seg_start):
+def _dec_w15_elem_prop_tail(buf, i, end, syms, stack, sub, seg_start,
+                           packet=_PACKET_NONE):
     """Round39 W15 array-property-tail attachment (oracle u22/z04/v05; corpus
     carriers foxchartsbeta.vcx::foxcharts ::23 stmts 99-101 and ctl32.vcx::
     ctl32_scontainer ::48 stmt 7 first occurrence). Inside a 43-group operand
@@ -4461,7 +4849,20 @@ def _dec_w15_elem_prop_tail(buf, i, end, syms, stack, sub, seg_start):
     """
     recv = None
     below = None
-    if isinstance(sub, MemberRef):
+    chain_recv = None
+    chain_subs = None
+    if _is_with_chain_operand(sub):
+        # r87-nestedelem: an element below its own marker — the WITH chain
+        # the W3 close left is this element's RECEIVER, never its
+        # subscriptage (oracle r87-nestedelem: `.A(<i>).B(<j>).C` pushes
+        # each subscript in its own 43 packet, so every value left on the
+        # segment stack at the outer marker is the outer element's own).
+        # The chain renders into the base exactly as the round-85
+        # system-root arm dotted its root run in.
+        chain_recv = _emit(sub)
+        chain_subs = list(stack)
+        del stack[:]
+    elif isinstance(sub, MemberRef):
         # receiver spelling: the f8 subscript packet rides BELOW the member
         # run — measured byte-exact as `f8 <w> <v> f4 <recv> e5 <arr>`
         if i - 6 < seg_start or buf[i - 3] != S.MEMBER or buf[i - 6] != S.INT8:
@@ -4483,7 +4884,12 @@ def _dec_w15_elem_prop_tail(buf, i, end, syms, stack, sub, seg_start):
         j += 3
     if recv is not None and not hops:
         return None                 # measured receiver spelling always hops
-    if recv is None and hops and j + 3 <= end and buf[j] == S.NAME:
+    if chain_recv is not None and hops and j + 3 <= end \
+            and buf[j] == S.NAME:
+        return None                 # r87-nestedelem: a method tail behind a
+        # WITH-nested chain is unmeasured — the stock arm keeps it.
+    if recv is None and chain_recv is None and hops and j + 3 <= end \
+            and buf[j] == S.NAME:
         # the run ends on the enclosing group's `f6` CALLEE instead of a
         # property — `arr[i].hop.method()`. The hops ride on the RECEIVER and
         # the f6 is left for the group, exactly as the zero-hop spelling
@@ -4500,6 +4906,12 @@ def _dec_w15_elem_prop_tail(buf, i, end, syms, stack, sub, seg_start):
     prop_id = S.u16(buf, j + 1)
     if max([arr_id, prop_id] + hops) >= len(syms):
         return None                 # stock arm raises the same beyond-table msg
+    if chain_recv is not None:
+        node = IndexedElemRef(
+            "%s.%s" % (chain_recv, _sym(syms, arr_id)), chain_subs,
+            prop=_sym(syms, prop_id),
+            hops=tuple(_sym(syms, h) for h in hops))
+        return node, j + 3
     if recv is None:
         node = IndexedElemRef(_sym(syms, arr_id), [sub],
                               prop=_sym(syms, prop_id),
@@ -4508,6 +4920,26 @@ def _dec_w15_elem_prop_tail(buf, i, end, syms, stack, sub, seg_start):
                 and buf[j + 3] in _W15_PACKET_CLOSE_AHEAD:
             # commit point: the packet frame holds nothing but this read and
             # the next byte is a measured :50 packet boundary -> implicit close
+            raise _GroupDone(node, j + 3)
+        if not stack and _GROUP_DEPTH >= 2 and j + 3 < end \
+                and packet & _PACKET_SINGLE_NONFIRST \
+                and isinstance(sub, (Num, Flt, Str, Bool, Null, Sym,
+                                     MemvarRef)) \
+                and buf[j + 3] not in (S.NAME, S.ESCAPE, S.X1A_ESCAPE):
+            # r87-sibling: a non-first inner packet holding an element read
+            # with a property tail closes implicitly wherever its tail ends:
+            # the packet is the element's own value and the bytes behind it
+            # belong outside — most often the outer callee's bare closer,
+            # which the stock path let the packet steal (oracle r87-sibling:
+            # every non-first element packet rides a single opener with no
+            # closer of its own, while a nested call doubles its opener even
+            # off-first and carries its own closer — LEN's 3e, ALLTRIM's 9b).
+            # A nested call's own closers keep the stock reading (f6/ea/x1a
+            # never close here), and a structural subscript keeps its lane's:
+            # a nested element below the marker is round 85 law 3's, a
+            # WITH-chain operand is round 87 law 1's — only a leaf subscript
+            # closes. The enclosing handler's empty-stack guard keeps a
+            # packet with earlier segments on the stock path.
             raise _GroupDone(node, j + 3)
         return node, j + 3
     # commit point: every check passed
@@ -4786,6 +5218,52 @@ def _dec_chain_group(buf, i, end, syms):
     return node, j                     # j == end (strict statement-final form)
 
 
+_FOLD_BARREN = (ArrayElement, IndexedElemRef, ObjectChain, MidCall,
+                MethodCall, Call, ChainRecv, WithMemberPath, ByrefCall)
+
+
+def _is_with_chain_operand(node) -> bool:
+    """A WITH-rooted round-28 W3 value: the chain's open operand, whose
+    receiver is the WITH object (the empty-string root).
+    """
+    return isinstance(node, MidCall) and bool(node.recv) \
+        and node.recv[0] == ""
+
+
+def _fold_implicit_element(stack) -> bool:
+    """r85-twosub: an implicit 43-packet close (window runout, fdclose) with
+    an element read on top — every push below it is the element's own
+    subscriptage (the packet rule: `v = arr[1, 2].p` is `43 f8 f8 e5 …`
+    with no callee). Prepend the lowers in order and report True. Anything
+    structural below (another element, a call, a receiver) is a packet
+    boundary the reader cannot see through: leave it and report False so
+    the historical refusal stands. Only a property-tailed read folds — a
+    bare `e5` close has no producer (no-prop reads spell `f6`) and stays
+    refused.
+    """
+    if len(stack) < 2 or not isinstance(stack[-1], IndexedElemRef) \
+            or stack[-1].prop is None:
+        return False
+    if any(isinstance(s, (ArrayElement, IndexedElemRef))
+           for s in stack[-1].subs):
+        # a nested-element chain already holds an element below its own
+        # marker (`arr[1].brr[2]`): folding an outer push over it would
+        # misread the boundary, and the emitter cannot render the result
+        # — the historical `unterminated 43 group` refusal stands (named).
+        return False
+    if any(_is_with_chain_operand(s) for s in stack[-1].subs):
+        # r87-nestedelem: a WITH-nested chain below the marker
+        # (`e2 e5<M> e5<N>`): the chain is the element's receiver, never
+        # outer subscriptage — folding here re-emits the nested read as a
+        # bare multi-subscript call. The historical refusal stands.
+        return False
+    if any(isinstance(v, _FOLD_BARREN) for v in stack[:-1]):
+        return False
+    stack[-1].subs[0:0] = stack[:-1]
+    del stack[:-1]
+    return True
+
+
 def _dec_group(buf, i, end, syms, opens_first_packet=False):
     """43-group: operands accumulate on one stack (binops included — FILE(GETENV(..)+..)),
     and a closer token names the callee: f6 <u16> user name, ea/x1a <u8> builtin escape,
@@ -4810,6 +5288,14 @@ def _dec_group(buf, i, end, syms, opens_first_packet=False):
 def _dec_group_run(buf, i, end, syms, stack, opens_first_packet=False):
     pending_marker = None
     byref_close_pending = False   # r38 a0004: '@arr(sub)' awaiting its f6 close
+    # r87-sibling: a single-opener non-first packet holds an element read,
+    # never a call (a nested call doubles its opener even off-first) — its
+    # segments carry the bit so the W15 tail reader can close the packet
+    # implicitly at the outer bytes. A doubled opener or a first packet
+    # never sets it; a flat outer group may set it but the tail reader's
+    # depth gate keeps it there.
+    single_nonfirst = (not opens_first_packet
+                       and not (i + 1 < end and buf[i + 1] == S.CALL_OPEN))
     j = i + 1
     while True:
         if j >= end:
@@ -4828,6 +5314,9 @@ def _dec_group_run(buf, i, end, syms, stack, opens_first_packet=False):
                 global _GROUP_EOW_CLOSE
                 _GROUP_EOW_CLOSE = True
                 return stack[0], j
+            if _fold_implicit_element(stack):
+                _GROUP_EOW_CLOSE = True
+                return stack[0], j
             raise Unsupported("unterminated 43 group")
         peek = buf[j]
         if peek == S.FD and _EXPR_RETRY_ACTIVE:
@@ -4838,6 +5327,8 @@ def _dec_group_run(buf, i, end, syms, stack, opens_first_packet=False):
             # rejected -- never dropped silently (faa199b32ddf0b1c:65 keeps its
             # blocked status under this arm).
             if len(stack) == 1 and not isinstance(stack[0], EmptyArg):
+                return stack[0], j
+            if _fold_implicit_element(stack):
                 return stack[0], j
             raise Unsupported("unterminated 43 group")
         if peek == S.ESCAPE and j + 2 <= end and buf[j + 1] == S.EA_BYREF_ID:
@@ -5094,7 +5585,9 @@ def _dec_group_run(buf, i, end, syms, stack, opens_first_packet=False):
                 # r49-residual: this group's FIRST segment, when it opens
                 # another 43, is the doubled-opener packet
                 packet=((_PACKET_INSIDE_FIRST if opens_first_packet else 0)
-                        | (_PACKET_OPENS_FIRST if j == i + 1 else 0)))
+                        | (_PACKET_OPENS_FIRST if j == i + 1 else 0)
+                        | (_PACKET_SINGLE_NONFIRST if single_nonfirst
+                           else 0)))
         except _GroupDone as gd:
             # round-27 implicit group close: an args-before-receiver chain
             # completes AND ends its group in one step (_GroupDone docstring),
@@ -5311,7 +5804,8 @@ def _dec_lvalue(buf, i, end, syms):
         # _CLIPTEXT = <expr>. Unknown ids keep the opcode rejection below —
         # round-35 grew the shared table by the corpus-forced reads
         # 0x32 _DOS / 0x33 _MAC / 0x34 _UNIX (provenance on schemas.SYSTEM_VARS),
-        # which enables their PUT forms through this same arm.
+        # which enables their PUT forms through this same arm. Round-86 grows it
+        # by 0x50/0x51/0x53/0x58/0x59 the same way (round86_ed_streams.json).
         if i + 2 <= end and buf[i + 1] in S.SYSTEM_VARS:
             return Sym(S.SYSTEM_VARS[buf[i + 1]]), i + 2
         raise Unsupported(f"lvalue opcode {op:#04x}")
@@ -5547,11 +6041,25 @@ def _dec_lvalue(buf, i, end, syms):
                 # all equal), so the yield is to `_dec_object_chain` from the
                 # TOP of the run, not from here: one chain grammar, one node.
                 # A chain without its terminal property keeps this arm's
-                # message, so `o.m(1).n(2) = v` — which VFP9 compiles and no
-                # program writes — stays refused.
+                # message — unless the last link carries arguments, which is
+                # the measured parameterized-property target (`o.m(1).n(2) =
+                # v`, round-86 law 4: one corpus carrier, compiled whole on
+                # the oracle). An argument-less tail does not compile, so
+                # the gate is exactly the measured run.
                 node, j2 = _dec_object_chain(buf, i, end, syms)
-                if node.calls and node.tail:
+                if node.calls and (node.tail or node.calls[-1][1]):
                     return node, j2
+            elif j + 6 <= end and buf[j] == S.NAME \
+                    and buf[j + 3] == S.FC:
+                # r86-oc: the f6-method second link is the same measured
+                # run with the middle call spelled `f6`
+                # (`o.m(1).n(2) = v` from a one-hop receiver). Scoped to
+                # the tailless shape, so a tailed `f6` chain keeps the
+                # historical message below.
+                chained, k2 = _dec_object_chain(buf, i, end, syms)
+                if chained.calls and not chained.tail \
+                        and chained.calls[-1][1]:
+                    return chained, k2
             raise Unsupported("indexed-member property component missing")
         prop = _sym(syms, S.u16(buf, j + 1))
         j += 3
@@ -5570,7 +6078,10 @@ def _dec_lvalue(buf, i, end, syms):
             node, j2 = _dec_object_chain(buf, i, end, syms)
         except Unsupported as e:
             raise Unsupported("lvalue %s" % e) from None
-        if not (node.calls and node.tail):
+        # r86-oc: a last link carrying arguments is the measured
+        # parameterized-property target — same gate as the twocall arm
+        # above, one chain grammar, one node.
+        if not (node.calls and (node.tail or node.calls[-1][1])):
             raise Unsupported("lvalue object-chain without terminal property")
         return node, j2
     if op == S.MEMBER:
@@ -7848,60 +8359,62 @@ def _dec_statement_checked(buf, syms):
         raise Unsupported("statement nesting exceeds recursion budget") from e
 
 
-# Round-37 package P7 (C08, probes H1-H8): the measured CAST AS-type matrix.
-# The type letter always rides the string payload fb0100<letter>; the number of
-# trailing width/decimal sub-groups is measured PER LETTER and nothing else is
-# bound: N takes two f8 literals (width, decimals), C/B/Q one (width),
-# D/T/Y/L/I none. Every other letter or arity stays rejected.
-_CAST_TYPE_ARITY = {"N": 2, "C": 1, "B": 1,
-                    "D": 0, "T": 0, "Y": 0, "L": 0, "I": 0,
-                    # r40 group43 ORACLE-MEASURED (probes/oracle_harvest/
-                    # round40_group43_streams.json c01: 'lnFSize = CAST(
-                    # loNode.Attributes.Item(0).NodeTypedValue AS F(8,2))'
-                    # compiles fb0100'F' f80108 f80102 e41a0f): F rides the
-                    # SAME width+decimal pair as N. Same batch's c04 records
-                    # that the ONE-group spelling 'AS F(8)' is real VFP and
-                    # stays UNBOUND — this table holds one arity per letter,
-                    # so widening it is a separate measured step with no
-                    # corpus carrier to force it. Carrier VFPxWorkbookXLSX.vcx::
-                    # vfpxworkbookxlsx readstylesxml stmt#55
-                    # 54F7140010FC4343F80100F40600F43500E52A00F73600
-                    # FB010046 F80108 F80102 E41A0F <-> stored L2437
-                    # 'lnFSize = CAST(loNode.Attributes.Item(0).NodeTypedValue
-                    # AS F(8,2))': payload 'F' followed by exactly two f8
-                    # groups 8 and 2, which is the only reading that makes the
-                    # gap a whole number of INT8 groups AND matches the stored
-                    # spelling. The zero-argument 'AS F' spelling (L1451/L1457
-                    # of the same class) rides the x1a channel directly and is
-                    # unaffected.
-                    "F": 2,
-                    # r42 I10 ORACLE-MEASURED (probes/oracle_harvest/
-                    # round42_cast_streams.json): Q is varbinary. Bare AS Q
-                    # (zero groups) already rode the stock closer; AS Q(n)
-                    # compiles fb0100'Q' + ONE f8 width, same arity as C/B.
-                    # s0005 'RETURN CAST(.NULL. AS Q(16))' <->
-                    # 42fc43e4fb010051f80210e41a0f, byte-identical to
-                    # 6c33aa10a70f595e:16 stmt3. Widths 1/8/16/254 all emit
-                    # one f8 (s0009/s0010/s0002/s0011). s0013 'AS Q(8,2)'
-                    # compiles TWO f8 groups and stays UNBOUND — one arity
-                    # per letter, same rule as F(8).
-                    "Q": 1}
+# Round-86 law 1 (r86-cast, probes/oracle_harvest/round86_cast_streams.json):
+# the CAST channel is a marker string plus width groups, with no letter check
+# by the producer — 196 programs, 192 compiled, 4 diagnostic, 0 cut-short.
+# Any single UPPERCASE letter binds zero to two f8 groups, one f9 group, or
+# one fa float group; three groups never occur (both three-group rows are
+# compiler refusals); multi-character markers WITH widths and the NOT NULL
+# closer stay refused (measured, no corpus carrier — bare multi-character
+# markers lift through the stock closer, which accepts any letter with no
+# groups, as it always has). This refutes the round-37/40/42
+# one-arity-per-letter rule the table below held: F binds one group (r40
+# c04 'AS F(8)') AND two (r40 c01 'AS F(8,2)'), Q binds two (r42 s0013 'AS
+# Q(8,2)') as well as one, V binds zero to two — the producer validates no
+# letter. Lowercase source spellings compile to the UPPERCASE payload, so a
+# lowercase payload never occurs on the wire and stays refused.
+#   r40 group43 ORACLE-MEASURED: 'lnFSize = CAST(... AS F(8,2))' compiles
+#   fb0100'F' f80108 f80102 e41a0f (kept); c04 'AS F(8)' is real VFP and now
+#   bound. r42 I10 ORACLE-MEASURED: 'AS Q(16)' compiles fb0100'Q' + ONE f8
+#   (kept); s0013 'AS Q(8,2)' now bound. r86 corpus: 45 'AS V(n)' one-group
+#   (widths 5/18/20) and one 'AS N(10.2)' fa-float, the matrix N(10.2) tail
+#   byte-identical to the stored section.
+_CAST_WIDTH_STEPS = {S.INT8: 3, S.INT16: 4, S.FLOAT: 11}
+
+
+def _cast_widths_ok(typ, ops):
+    """Whether a marker plus width-group opcodes is the measured CAST shape.
+
+    ``ops`` are the S.opcodes of the groups between the marker and the
+    closer: zero to two f8, one f9, or one fa — and nothing else, in no other
+    count. The bare (zero-group) shape is NOT judged here: the stock closer
+    below accepts any letter with no groups, as it always has.
+    """
+    if len(typ) != 1 or not ("A" <= typ <= "Z"):
+        return False
+    if not ops:
+        return True
+    if all(op == S.INT8 for op in ops) and len(ops) in (1, 2):
+        return True
+    return len(ops) == 1 and ops[0] in (S.INT16, S.FLOAT)
 
 
 def _fold_cast_args(stack):
-    """CAST closer 1a 0f: consume the e4 Null marker and optional INT8 widths.
+    """CAST closer 1a 0f: consume the e4 Null marker and optional widths.
 
     Zero extra nums: any type letter, stock [value, Str, Null] -> [value, Str].
-    One/two INT8 nums: only when ``_CAST_TYPE_ARITY[letter]`` matches that
-    count; fold into the type text ('Q(16)', 'N(20,12)'). f9/e9/fa widths,
-    a wrong count, and leftover values keep
+    Width nums: the measured shape only (``_cast_widths_ok``) — one/two INT8,
+    one INT16, or one FLOAT group — folded into the type text ('Q(16)',
+    'N(20,12)', 'V(300)', 'N(10.2)'). Anything else keeps
     ``CAST argument/type marker shape``.
     """
     if not stack or not isinstance(stack[-1], Null):
         raise Unsupported("CAST argument/type marker shape")
     stack.pop()
     nums = []
-    while stack and isinstance(stack[-1], Num) and stack[-1].op == S.INT8:
+    while stack and ((isinstance(stack[-1], Num)
+                      and stack[-1].op in (S.INT8, S.INT16))
+                     or isinstance(stack[-1], Flt)):
         nums.append(stack.pop())
     nums.reverse()
     if len(stack) != 2 or not isinstance(stack[-1], Str):
@@ -7909,7 +8422,8 @@ def _fold_cast_args(stack):
     if not nums:
         return
     typ = stack[-1].text
-    if _CAST_TYPE_ARITY.get(typ) != len(nums):
+    ops = [n.op if isinstance(n, Num) else S.FLOAT for n in nums]
+    if not _cast_widths_ok(typ, ops):
         raise Unsupported("CAST argument/type marker shape")
     if len(nums) == 2:
         stack[-1] = Str("%s(%s,%s)" % (typ, nums[0].spelling, nums[1].spelling))
@@ -7922,14 +8436,15 @@ def _dec_assign_cast_numeric(buf, lv, m, end, syms):
     generalized by round-37 package P7 to the full measured AS-type family.
 
     Wire (all carriers are ASSIGN statements; r34 census blockers.jsonl +
-    corpus bytes; H1-H8 fresh oracle compiles): ::
+    corpus bytes; H1-H8 fresh oracle compiles; r86-cast 196 programs): ::
 
-      54 <lvalue> 10 fc 43 <value> fb0100<letter> [f8<dg><w>] [f8<dg><d>]
-      e4 1a 0f [tail]
+      54 <lvalue> 10 fc 43 <value> fb0100<letter> [widths] e4 1a 0f [tail]
 
-    Measured arms (round37_findings.json C08 evidence rows — exactly these):
-    N+width+decimals, C+width, D, T, Y, L, I, B+width. H1 'CAST(m.lnV AS
-    N(14, 7))' <-> ...fb01004ef8020ef80107e41a0f; H2 C(254) rides ONE f8;
+    Measured arms: round 37's N/C/D/T/Y/L/I/B family (round37_findings.json
+    C08), round 40's F pair, round 42's Q pair — and round 86's law 1, which
+    refutes the per-letter arity: the producer validates no letter, so any
+    single UPPERCASE letter binds the measured width shapes. H1 'CAST(m.lnV
+    AS N(14, 7))' <-> ...fb01004ef8020ef80107e41a0f; H2 C(254) rides ONE f8;
     H8 B(7) likewise; D/T/Y/L/I close straight after the letter.
 
     Carriers (VFPxWorkbookXLSX.vcx::vfpxworkbookxlsx s34, stored
@@ -7948,12 +8463,14 @@ def _dec_assign_cast_numeric(buf, lv, m, end, syms):
     can neither lift nor change any blocked message:
 
       - exactly ONE ``e4 1a 0f`` closer occurrence in the statement;
-      - the type marker is a SINGLE measured letter riding the string payload
-        (P7); near-neighbour spellings ('n', F(8,2), multi-char markers)
-        carry no measured binding and stay blocked;
-      - width/decimals arrive as three-byte INT8 (f8) literal sub-groups
-        counted by the per-letter arity table above -- missing or extra
-        groups, or f9/e9/fa-encoded numbers in those slots stay rejected;
+      - the type marker is a SINGLE UPPERCASE letter riding the string payload
+        (r86-cast: lowercase source spellings compile to the uppercase
+        payload, so a lowercase payload never occurs on the wire and stays
+        refused; multi-character markers stay refused — measured, no corpus
+        carrier);
+      - widths are zero to two f8 groups, one f9 group, or one fa float group
+        (r86-cast) — three groups, mixed encodings, and e9 widths stay
+        rejected;
       - the value is ONE node decoded from inside the leading 43 group;
       - the statement tail is empty, exactly the 4-byte bare-symbol op form,
         or -- P7, the s64 stmt65 shape -- exactly ONE 11-byte FLOAT literal
@@ -7969,30 +8486,46 @@ def _dec_assign_cast_numeric(buf, lv, m, end, syms):
     k = buf.find(b"\xe4\x1a\x0f")
     if k < 0 or buf.find(b"\xe4\x1a\x0f", k + 1) >= 0:
         raise Unsupported("cast closer missing/ambiguous")
-    # Type literal + measured width/decimal sub-groups: scan back from the
-    # closer for a string payload whose declared length fills exactly up to a
-    # whole number of INT8 groups before the closer, with the payload being a
-    # single letter whose measured arity matches that count (same
-    # nearest-to-closer candidate convention as the r34 lane).
+    # Type literal + measured width sub-groups: scan back from the closer for
+    # a string payload whose declared length fills exactly up to the measured
+    # shape before the closer — zero to two f8 groups, one f9, or one fa
+    # (same nearest-to-closer candidate convention as the r34 lane). The
+    # payload must be a single uppercase letter; anything else keeps the
+    # stock rejection.
     tpos = None
     tlit_end = None
+    tlit_ops: list = []
     for cand in range(k - 4, max(k - 46, 0), -1):
         if buf[cand] not in (S.STR, S.STR2):
             continue
         cand_end = cand + 3 + S.u16(buf, cand + 1)
-        gap = k - cand_end
-        if gap < 0 or gap % 3:
+        ops: list = []
+        pos = cand_end
+        while pos < k:
+            step = _CAST_WIDTH_STEPS.get(buf[pos])
+            if step is None or pos + step > k:
+                break
+            ops.append(buf[pos])
+            pos += step
+        if pos != k:
             continue
         typ = _payload_text(buf[cand + 3:cand_end])
-        if _CAST_TYPE_ARITY.get(typ) != gap // 3:
+        if not _cast_widths_ok(typ, ops):
             continue
-        if any(buf[p] != S.INT8 for p in range(cand_end, k, 3)):
-            continue
-        tpos, tlit_end = cand, cand_end
+        tpos, tlit_end, tlit_ops = cand, cand_end, ops
         break
     if tpos is None:
         raise Unsupported("cast type literal missing")
-    nums = [str(buf[p + 2]) for p in range(tlit_end, k, 3)]
+    nums = []
+    pos = tlit_end
+    for op in tlit_ops:
+        if op == S.INT8:
+            nums.append(str(buf[pos + 2]))
+        elif op == S.INT16:
+            nums.append(str(_struct.unpack_from("<h", buf, pos + 2)[0]))
+        else:
+            nums.append(_fmt_float(_struct.unpack_from("<d", buf, pos + 3)[0]))
+        pos += _CAST_WIDTH_STEPS[op]
     typ = _payload_text(buf[tpos + 3:tlit_end])
     if len(nums) == 2:
         type_text = "%s(%s,%s)" % (typ, nums[0], nums[1])
@@ -10921,9 +11454,13 @@ def _dec_statement(buf, syms):
         noupdate = False
         again = False
         alias = None
+        alias_idx = None
         norequery = False
         nodata = False
         order = None
+        order_tag = None
+        index = None
+        online = False
         seen_name = False
         j = 1
         while j < end:
@@ -11014,14 +11551,79 @@ def _dec_statement(buf, syms):
             elif op == 0xC3 and seen_name and order is None:
                 # round-28 W4: ORDER <tag> ('Use Employee Order reports_to',
                 # workerchart Form1 s4[7]; _cookie s? 'ORDER 1' as a string)
+                # r89-usetrail: the tag is a grouped expression too, or
+                # absent (`USE ... ORDER` compiles to a bare c3);
+                # DESCENDING (3c) rides behind any tag form.
                 j += 1
-                if j + 3 > end or buf[j] not in (S.STR, S.STR2):
+                if j == end:
+                    order = ""
+                elif j + 3 <= end and buf[j] in (S.STR, S.STR2):
+                    order, j = _dec_str_arg(buf, j, end)
+                    order_tag = order
+                elif buf[j] == S.FC:
+                    try:
+                        oes, k = _dec_expr(buf, j + 1, end, syms,
+                                           stop_bytes=_IF_COND_STOP)
+                    except (IndexError, _struct.error) as e:
+                        raise Unsupported("USE trailing bytes") from e
+                    if len(oes) != 1:
+                        raise Unsupported("USE trailing bytes")
+                    if k < end and buf[k] == S.FD:
+                        k += 1
+                    elif k != end:
+                        raise Unsupported("USE trailing bytes")
+                    order = _emit(oes[0])
+                    j = k
+                else:
                     raise Unsupported("USE trailing bytes")
-                order, j = _dec_str_arg(buf, j, end)
+                if j < end and buf[j] == S.SET_ORDER_DESCENDING_MARK:
+                    if not order:
+                        raise Unsupported("USE trailing bytes")
+                    order += " DESCENDING"
+                    j += 1
+            elif op == 0xC1 and seen_name and index is None:
+                # r89-usetrail: the INDEX file list behind the name —
+                # grouped expressions or bare paths, 07-joined, or absent
+                # (`USE ... INDEX` compiles to a bare c1).
+                parts = []
+                k = j + 1
+                while k < end:
+                    if buf[k] == S.FC:
+                        try:
+                            ies, g = _dec_expr(buf, k + 1, end, syms,
+                                              stop_bytes=_IF_COND_STOP)
+                        except (IndexError, _struct.error) as e:
+                            raise Unsupported("USE trailing bytes") from e
+                        if len(ies) != 1:
+                            raise Unsupported("USE trailing bytes")
+                        if g < end and buf[g] == S.FD:
+                            g += 1
+                        elif g != end:
+                            raise Unsupported("USE trailing bytes")
+                        parts.append(_emit(ies[0]))
+                        k = g
+                    elif k + 3 <= end and buf[k] in (S.STR, S.STR2):
+                        s, k = _dec_str_arg(buf, k, end)
+                        parts.append(s)
+                    else:
+                        raise Unsupported("USE trailing bytes")
+                    if k < end and buf[k] == S.ARGJOIN:
+                        k += 1
+                        if k >= end:
+                            raise Unsupported("USE trailing bytes")
+                        continue
+                    break
+                index = ", ".join(parts)
+                j = k
+            elif op == 0xD6 and seen_name and not online:
+                # r89-usetrail: ONLINE rides bare behind the name.
+                online = True
+                j += 1
             elif op == S.USE_ALIAS_MARK and seen_name and alias is None:
                 j += 1
                 if j + 3 <= end and buf[j] == S.SYM:
-                    alias = _sym(syms, S.u16(buf, j + 1))
+                    alias_idx = S.u16(buf, j + 1)
+                    alias = _sym(syms, alias_idx)
                     j += 3
                 elif j + 3 <= end and buf[j] in (S.STR, S.STR2):
                     # round-28 W4: quoted-string alias operand
@@ -11064,7 +11666,10 @@ def _dec_statement(buf, syms):
             raise Unsupported("USE trailing bytes")
         return UseStmt(name=name, in_area=in_area, exclusive=exclusive,
                        shared=shared, noupdate=noupdate, again=again, alias=alias,
-                       norequery=norequery, nodata=nodata, order=order)
+                       norequery=norequery, nodata=nodata, order=order,
+                       index=index, online=online,
+                       order_first=_use_order_first(syms, alias_idx,
+                                                    order_tag, name))
     if lead == S.EXTERNAL_LEAD:
         # EXTERNAL <kind> [<name>[, <name>...]] — the whole command,
         # r76-external.
@@ -11667,7 +12272,8 @@ def _dec_statement(buf, syms):
             if t != end:
                 raise Unsupported("DO FORM trailing bytes")
             return DoStmt(prog, args, form=True, to_target=to_target,
-                          name_target=name_target, flags=flags)
+                          name_target=name_target, flags=flags,
+                          with_first=_do_with_first(to_target, args, syms))
         prog = None
         t = 1
         if buf[1] in (S.STR, S.STR2):
@@ -12584,8 +13190,19 @@ def _dec_statement(buf, syms):
                                          grouped=(word == "BAR"))
             owner = ""
             if k < end and buf[k] == S.SET_OF_MARK:
-                name, k = _dec_set_of_operand(buf, k + 1, end, syms)
-                owner = " OF %s" % name
+                # r89-setvariant: the owner may be a DOUBLE-quoted popup
+                # name (`SET MARK OF BAR 6 OF "pp" TO .T.`); a bare fb
+                # owner is unmeasured and stays refused.
+                if k + 4 <= end and buf[k + 1] == S.STR2:
+                    n = S.u16(buf, k + 2)
+                    if k + 4 + n > end:
+                        raise Unsupported(
+                            "SET variant outside forced subset")
+                    owner = " OF \"%s\"" % _payload_text(buf[k + 4:k + 4 + n])
+                    k += 4 + n
+                else:
+                    name, k = _dec_set_of_operand(buf, k + 1, end, syms)
+                    owner = " OF %s" % name
             to = ""
             if k < end and buf[k] == S.TO_MARK:
                 if buf[1] not in S.SET_OF_BAR_TO_IDS:
@@ -12651,6 +13268,111 @@ def _dec_statement(buf, syms):
                     raise Unsupported("SET SYSMENU pad-list trailing bytes")
                 return SetStmt("SET SYSMENU TO " + ", ".join(pads))
             raise Unsupported("SET variant outside forced subset")
+        # r89-setvariant: the setting ids and clause orders round 71 did not
+        # adopt. Every shape below is carrier-aligned to its stored source
+        # and oracle-measured (round89_setvariant matrix, 42 compile); the
+        # KEY gate stands ahead of the generic value gate because the RANGE
+        # mark would otherwise fall into it, and the whole block stands
+        # ahead of the end==3 pre-gate because the new ids are outside its
+        # ONOFF table. Spellings the compiler declines stay refused.
+        sid = buf[1]
+        # SET FUNCTION <key> TO [<expr>] — the key rides a bare fb string;
+        # a quoted key is unmeasured and stays refused.
+        if sid == 0x1D and end >= 6 and buf[2] == S.STR:
+            n = S.u16(buf, 3)
+            if 5 + n >= end or buf[5 + n] != S.TO_MARK:
+                raise Unsupported("SET variant outside forced subset")
+            key = _payload_text(buf[5:5 + n])
+            k = 6 + n
+            if k == end:
+                return SetStmt("SET FUNCTION %s TO" % key)
+            es, k, _u = dec_set_value(buf, k, end, syms, sid=None)
+            if k != end:
+                raise Unsupported("SET trailing bytes")
+            return SetStmt("SET FUNCTION %s TO %s" % (key, _emit(es)))
+        # SET ENGINEBEHAVIOR with no value — the valued wire already reads
+        # through SET_NO_TO_VALUE_IDS; the bare statement leaves no trace.
+        if sid == 0x90 and end == 2:
+            return SetStmt("SET ENGINEBEHAVIOR")
+        # SET CURRENCY LEFT|RIGHT — the side rides its own mark, no TO.
+        if sid == 0x38 and end == 3 and buf[2] in (0x58, 0x59):
+            return SetStmt("SET CURRENCY %s"
+                           % ("LEFT" if buf[2] == 0x58 else "RIGHT"))
+        # SET DIRECTORY TO [<expr>] — the grouped value or the bare TO.
+        if sid == 0x76 and end >= 3 and buf[2] == S.TO_MARK:
+            if end == 3:
+                return SetStmt("SET DIRECTORY TO")
+            es, k, _u = dec_set_value(buf, 3, end, syms, sid=None)
+            if k != end:
+                raise Unsupported("SET trailing bytes")
+            return SetStmt("SET DIRECTORY TO %s" % _emit(es))
+        # SET KEY TO RANGE <e1>[, <e2>] — the RANGE mark then one or two
+        # groups; a dangling joiner behind a single group is the measured
+        # one-operand spelling.
+        if sid == 0x79 and end >= 6 and buf[2] == S.TO_MARK \
+                and buf[3] == 0xC7:
+            k = 4
+            parts = []
+            while True:
+                if k >= end or buf[k] != S.FC:
+                    raise Unsupported("SET variant outside forced subset")
+                res, k = _dec_expr(buf, k + 1, end, syms,
+                                   stop_bytes=_IF_COND_STOP)
+                if len(res) != 1:
+                    raise Unsupported("SET variant outside forced subset")
+                if k < end and buf[k] == S.FD:
+                    k += 1
+                parts.append(_emit(res[0]))
+                if k < end and buf[k] == S.ARGJOIN:
+                    k += 1
+                    if k == end:
+                        break
+                    continue
+                break
+            if k != end:
+                raise Unsupported("SET trailing bytes")
+            return SetStmt("SET KEY TO RANGE %s" % ", ".join(parts))
+        # SET TOPIC ID TO [<expr>] — the ID sub-key then the grouped value
+        # or the bare TO. Only the grouped value is measured; a bare name
+        # behind the TO stays refused.
+        if sid == 0x55 and end >= 4 and buf[2] == 0x49 \
+                and buf[3] == S.TO_MARK:
+            if end == 4:
+                return SetStmt("SET TOPIC ID TO")
+            es, k, _u = dec_set_value(buf, 4, end, syms, sid=None)
+            if k != end:
+                raise Unsupported("SET trailing bytes")
+            return SetStmt("SET TOPIC ID TO %s" % _emit(es))
+        # SET TALK WINDOW [(<expr>)] | NOWINDOW.
+        if sid == 0x32 and end >= 3 and buf[2] == 0x2C:
+            if end == 3:
+                return SetStmt("SET TALK WINDOW")
+            es, k, _u = dec_set_value(buf, 3, end, syms, sid=None)
+            if k != end:
+                raise Unsupported("SET trailing bytes")
+            return SetStmt("SET TALK WINDOW %s" % _emit(es))
+        if sid == 0x32 and end == 3 and buf[2] == 0x3D:
+            return SetStmt("SET TALK NOWINDOW")
+        # SET FIELDS GLOBAL|LOCAL.
+        if sid == 0x18 and end == 3 and buf[2] in (0xC1, 0xC0):
+            return SetStmt("SET FIELDS %s"
+                           % ("GLOBAL" if buf[2] == 0xC1 else "LOCAL"))
+        # SET TABLEPROMPT | READBORDER | SQLBUFFERING ON|OFF — untabled ids
+        # with the plain toggle.
+        if sid in (0x94, 0x6A, 0x92) and end == 3 \
+                and buf[2] in (0x20, 0x1F):
+            names = {0x94: "TABLEPROMPT", 0x6A: "READBORDER",
+                     0x92: "SQLBUFFERING"}
+            return SetStmt("SET %s %s"
+                           % (names[sid],
+                              "ON" if buf[2] == 0x20 else "OFF"))
+        # SET DATE (<expr>) — the parenthesised date form; the bare keyword
+        # spellings already read through the DATE arm above.
+        if sid == S.SET_DATE_ID and end >= 4 and buf[2] == S.FC:
+            es, k, _u = dec_set_value(buf, 2, end, syms, sid=None)
+            if k != end:
+                raise Unsupported("SET trailing bytes")
+            return SetStmt("SET DATE %s" % _emit(es))
         if end == 3:
             if buf[1] in S.SET_BARE_TO_NAMES and buf[2] == S.TO_MARK:
                 return SetStmt("SET %s TO" % S.SET_BARE_TO_NAMES[buf[1]])
@@ -13420,14 +14142,18 @@ def _dec_statement(buf, syms):
             # read in VALUE position do (`e1 <id> e5 <arr> …` and
             # `df e3 <cls> f4 <c> … f7`, both refused on the read side too).
             #
-            # The `df` opener is admitted ONLY with the doubled terminal. Round
-            # 33's negative gate stands: a bare `df e3 <cls> f7 <mbr>` with no
-            # repeat has no producer — the compiler writes the repeat for every
-            # one-link run it was offered — so accepting it would read a stream
-            # VFP9 never emits and re-emit text that recompiles to a different
-            # frame.
+            # The `df` opener is admitted with the doubled terminal (round
+            # 33's exact spelling) or as a statement-final multi-link
+            # property run (r87-stmtscop: the repeat is the one-link
+            # spelling's alone). Round 33's negative gate stands: a bare
+            # `df e3 <cls> f7 <mbr>` with no repeat has no producer — the
+            # compiler writes the repeat for every one-link run it was
+            # offered — so accepting it would read a stream VFP9 never
+            # emits and re-emit text that recompiles to a different frame.
             scope_dup = buf[j] == S.SCOPE_OP and _bare_scope_dup(buf, j, end)
-            if buf[j] == 0xE1 or scope_dup:
+            scope_multi = buf[j] == S.SCOPE_OP and _bare_scope_multiprop(
+                buf, j, end, syms)
+            if buf[j] == 0xE1 or scope_dup or scope_multi:
                 sub_end = end - 3 if scope_dup else end
                 try:
                     es, k = _dec_expr(buf, j, sub_end, syms)
@@ -13435,6 +14161,14 @@ def _dec_statement(buf, syms):
                     es, k = (), -1
                 if k == sub_end and len(es) == 1:
                     return ExprStmt(es[0], bare=True)
+            if buf[j] == 0xE1:
+                # r87-methtail: the with-args method tail under a
+                # system-object root. Strictly additive: gated on the
+                # opener, and every shape it declines falls through to
+                # the stock readers below with its historical refusal.
+                node = _dec_sysroot_elem_call(buf, j, end, syms)
+                if node is not None:
+                    return ExprStmt(node, bare=True)
             # 99 f5 0d <f4 hop>+ f7 <term>: m.<var>.<path> bare invocation,
             # statement-final (round 33 lane R33-1); non-final or missing
             # terminal f7 stays with the stock reader unchanged.
@@ -14928,8 +15662,9 @@ def _dec_statement(buf, syms):
         # [WHERE <cond>]` is `70 <table> [15 <src>] ca <col> 10 fc <expr>
         # (fd 07 <col> 10 fc <expr>)* [fd c6 fc <cond>]`. The SET mark is the
         # same `ca` INDEX TAG spends, and WHERE is the `c6` SELECT-SQL's own
-        # WHERE carries. The compiler canonicalises FROM in front of SET; the
-        # emission writes the source order, which recompiles to one frame.
+        # WHERE carries. The wire keeps FROM in front of SET; the emission
+        # keeps that order too, because the table follows source word order
+        # (r89-updateset).
         table, t = _r50_operand(buf, 1, end, syms, "UPDATE")
         src = None
         if t < end and buf[t] == S.FROM_MARK:
@@ -14938,11 +15673,30 @@ def _dec_statement(buf, syms):
             raise Unsupported("UPDATE SET clause missing")
         t += 1
         sets = []
+        col_idxs = []
         while True:
-            if t + 3 > end or buf[t] != S.SYM:
+            if t + 3 <= end and buf[t] == S.SYM:
+                col_idxs.append(S.u16(buf, t + 1))
+                col = _sym(syms, S.u16(buf, t + 1))
+                t += 3
+            elif t + 3 <= end and buf[t] == S.MEMBER:
+                # r89-updateset: a SET column that is not a bare symbol
+                # is a member path — `f4 <root> [f4 <mid>] f7 <col>`
+                # reads as its dotted spelling, alone or mixed with bare
+                # columns in either list order.
+                parts = []
+                while t + 3 <= end and buf[t] == S.MEMBER:
+                    col_idxs.append(S.u16(buf, t + 1))
+                    parts.append(_sym(syms, S.u16(buf, t + 1)))
+                    t += 3
+                if t + 3 > end or buf[t] != S.SYM:
+                    raise Unsupported("UPDATE SET column missing")
+                col_idxs.append(S.u16(buf, t + 1))
+                parts.append(_sym(syms, S.u16(buf, t + 1)))
+                t += 3
+                col = ".".join(parts)
+            else:
                 raise Unsupported("UPDATE SET column missing")
-            col = _sym(syms, S.u16(buf, t + 1))
-            t += 3
             if t + 1 >= end or buf[t] != S.EQ or buf[t + 1] != S.FC:
                 raise Unsupported("UPDATE SET value missing")
             es, t = _dec_expr(buf, t + 2, end, syms, stop_bytes=_IF_COND_STOP)
@@ -14968,9 +15722,19 @@ def _dec_statement(buf, syms):
             where = _emit(wes[0])
         if t != end:
             raise Unsupported("UPDATE trailing bytes")
-        line = "UPDATE %s SET %s" % (table, ", ".join(sets))
-        if src is not None:
-            line += " FROM %s" % src
+        # r89-updateset: FROM rides ahead of SET on the wire (`70 <table>
+        # [15 <src>] ca ...`) either way, but the table follows the
+        # author's clause order — a SET-first emission of a FROM-first
+        # source recompiles to a shifted table (matrix referee: all 17
+        # FROM rows). The emission keeps the author's order, recovered
+        # from the section table.
+        from_first = _update_from_first(syms, table, src, col_idxs)
+        if from_first and src is not None:
+            line = "UPDATE %s FROM %s SET %s" % (table, src, ", ".join(sets))
+        else:
+            line = "UPDATE %s SET %s" % (table, ", ".join(sets))
+            if src is not None:
+                line += " FROM %s" % src
         if where is not None:
             line += " WHERE %s" % where
         return CommandLine(line)
@@ -15938,6 +16702,28 @@ def _walk_block(stmts, i, stop, syms, stops=frozenset(), code_base=None,
             otherwise_body = None
             oth_off = None                      # OTHERWISE mark, when one follows
             pos = i + 1
+            # r89-docase: the opener's t_first skips the stray run the
+            # oracle keeps in-frame ahead of the first CASE — a workarea
+            # SELECT, an assignment, a LOCAL (each decoded by its shipped
+            # arm; anything else, or anything those arms refuse, keeps
+            # the stray verdict at the clause loop below).
+            strays = []                         # (ast, stmt) in order
+            while pos < stop:
+                s2 = stmts[pos]
+                if s2.text is not None:
+                    break
+                if s2.stream[0] not in (S.SELECT_WA, S.ASSIGN, S.LOCAL):
+                    break
+                try:
+                    st = dec_statement(s2.stream, syms)
+                except Unsupported:
+                    raise Unsupported(
+                        "unexpected statement inside DO CASE")
+                if not isinstance(st, (SelectStmt, Assign, Local)):
+                    break
+                strays.append((st, s2))
+                pos += 1
+            first_pos = pos
             while True:
                 if pos >= stop:
                     raise Unsupported("DO CASE without ENDCASE")
@@ -16001,7 +16787,7 @@ def _walk_block(stmts, i, stop, syms, stops=frozenset(), code_base=None,
                 raise Unsupported(f"case jump target {last_c.rel_target} != "
                                   f"{'OTHERWISE' if oth_off is not None else 'ENDCASE'} "
                                   f"distance {want_last}")
-            want_first = stmts[i + 1].offset - code_base
+            want_first = stmts[first_pos].offset - code_base
             if ast.t_first != want_first:
                 raise Unsupported(f"do-case first target {ast.t_first} != "
                                   f"first CASE distance {want_first}")
@@ -16010,6 +16796,7 @@ def _walk_block(stmts, i, stop, syms, stops=frozenset(), code_base=None,
                 raise Unsupported(f"do-case end target {ast.t_end} != ENDCASE "
                                   f"distance {want_end}")
             ast.clauses = collected
+            ast.strays = [st for st, _sst in strays]
             if otherwise_body is not None:
                 ast.otherwise_body = otherwise_body
             out.extend(_emit_line(ast).split("\n"))
@@ -16947,7 +17734,11 @@ def _emit_line(ast):
         # canonical clause order reproduces every measured source spelling:
         # 'USE LU3 IN 0 EXCLUSIVE', 'USE (e) EXCLUSIVE ALIAS (…)',
         # 'USE (e) SHARED NOUPDATE ALIAS (…)',
-        # 'USE (e) AGAIN SHARED NOUPDATE ALIAS FRX' (fxlistener s38).
+        # 'USE (e) AGAIN SHARED NOUPDATE ALIAS FRX' (fxlistener s38),
+        # 'USE x INDEX y SHARED IN 0', 'USE t ORDER (m.tag)',
+        # 'USE (e) EXCLUSIVE ONLINE'. One author spelled ORDER ahead of
+        # ALIAS; the wire keeps ALIAS first either way, and the decoder
+        # recovers the source order from the table (order_first).
         parts = ["USE " + ast.name] if ast.name else ["USE"]
         if ast.again:
             parts.append("AGAIN")
@@ -16959,10 +17750,21 @@ def _emit_line(ast):
             parts.append("IN " + ast.in_area)
         if ast.exclusive:
             parts.append("EXCLUSIVE")
+        order_text = None
+        if getattr(ast, "order", None) is not None:
+            order_text = "ORDER" + ("" if not ast.order else " " + ast.order)
+        if ast.alias is not None and order_text is not None \
+                and getattr(ast, "order_first", False):
+            parts.append(order_text)
+            order_text = None
         if ast.alias is not None:
             parts.append("ALIAS " + ast.alias)
-        if getattr(ast, "order", None) is not None:
-            parts.append("ORDER " + ast.order)
+        if order_text is not None:
+            parts.append(order_text)
+        if getattr(ast, "index", None) is not None:
+            parts.append("INDEX" + ("" if not ast.index else " " + ast.index))
+        if getattr(ast, "online", False):
+            parts.append("ONLINE")
         if getattr(ast, "nodata", False):
             parts.append("NODATA")
         if getattr(ast, "norequery", False):
@@ -17343,10 +18145,12 @@ def _emit_line(ast):
                 line += " IN " + _emit(ast.in_target)
         if ast.name_target is not None:
             line += " NAME " + _emit(ast.name_target)
-        if ast.to_target is not None:
+        if ast.to_target is not None and not ast.with_first:
             line += " TO " + _emit(ast.to_target)
         if ast.args:
             line += " WITH " + ", ".join(_emit(a) for a in ast.args)
+        if ast.to_target is not None and ast.with_first:
+            line += " TO " + _emit(ast.to_target)
         for fl in ast.flags or []:
             line += " " + fl
         return line
@@ -17371,6 +18175,10 @@ def _emit_line(ast):
             # recompiled as eight spaces because a raw prepend put the indent
             # in front of the VERBATIM_MARK and the NUL then truncated the
             # line for the compiler)
+            # r89-docase: the stray run the opener's t_first skips emits
+            # ahead of the first CASE, at clause level.
+            for st in ast.strays:
+                lines.extend("    " + ln for ln in _emit_line(st).split("\n"))
             for cl, _st in ast.clauses:
                 # r54-macrocase: a macro clause IS its stored line — re-emit it
                 # rather than rebuilding a CASE the compiler never compiled

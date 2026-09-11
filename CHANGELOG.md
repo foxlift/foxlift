@@ -3,6 +3,45 @@
 FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the version in
 `pyproject.toml`.
 
+## 0.6.0 — 2026-09-12
+
+The wave-3 close: five decoder lanes measured together on one tree, both sealed
+splits opened once, and the blocked surface cut by a further 38%.
+
+- Wave 3 measured whole. Development split of the second corpus: 103,015 of
+  103,363 sections lift with zero leaked bytes (0.5.0: 102,798), and blocked
+  sections fell from 565 to 348 across 92 refusal classes in 257 records
+  (0.5.0: 106 classes, 406 records). Compiled programs 5,266 of 5,476. Not one
+  repository regressed; every one gained or held.
+- Both sealed splits opened once at the close, with no tuning after. The
+  held-out split of the first corpus lifts 1,023 of 1,030 sections (99.3%),
+  with its reconstruct identical at 1,174 of 1,918 and every compile-clean file
+  holding at 110 of 110. The sealed split of the second corpus, opened for the
+  third time ever, lifts 13,845 of 13,978 sections (99.05%, from 13,809): three
+  refusal classes emptied, none new, none grew, and its table path re-read
+  identical at 3,815 of 3,971.
+- The first corpus's table path closed further: 29,595 of 29,597 form and class
+  sections recompile to equal frames and symbol tables (0.5.0: 29,581), and
+  compiled programs 1,041 of 1,050. Member conservation holds on both corpora
+  with zero no-trace members; the second corpus's named refusals fell from 958
+  to 474.
+- The expression reader, value side: the multi-link scope-member run, the
+  element under a system root, and the two-subscript element read.
+- The round-78 residue closed: the CAST channel as a marker plus width groups,
+  five system-variable ids the sweep missed, the `e0` member tail behind an
+  element-hop run, and call-tailed PUT targets.
+- The expression reader, statement side: nested-element reads take the WITH
+  chain as receiver, an element under a system root resolves to its method
+  tail's receiver, a non-first inner element packet closes implicitly at the
+  outer bytes, and the statement arm routes multi-link scope runs.
+- CREATE CURSOR field tails read whole: `0xbd` is NOCPTRANS and `0x0e` is
+  DEFAULT, leaving the bank with no unknown mark.
+- The record-level work queue's five largest families, closed in queue order:
+  the DO WITH memvar slot, the thirteen SET ids round 71 left, UPDATE SET
+  member-path columns, USE trailing bytes, and the DO CASE walker.
+- Instruments: unique driver paths with a driver-wide mutex, shared-stage
+  retry, content-checked seals, and the wave-3 scorecard with both reveals.
+
 ## 0.5.0 — 2026-09-06
 
 The wave-2 close: both corpora and both sealed splits measured together on one
