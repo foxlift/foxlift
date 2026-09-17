@@ -89,6 +89,11 @@ ON_SELECTION_OF = 0xC3
 # a selector under lead 0x31 — disjoint namespaces, never a global table.
 ON_BARE_LEAD = 0x7B
 ON_PAGE_SELECTOR = 0xBE     # value collides with ENDTRY_LEAD; context-local
+ON_BARE_KEY = 0x17          # bare `ON KEY` (no 32 mark); the 32-mark form is KEY LABEL
+ON_BARE_ESCAPE = 0xBD       # bare `ON ESCAPE`; same byte as ON_SELECTOR_ESCAPE, this lead
+ON_BARE_READERROR = 0xC8    # bare `ON READERROR`
+ON_BARE_BAR = 0x06          # `ON BAR <n> OF <popup>`; same byte as ON_SELECTION_BAR, this lead
+ON_BARE_PAD = 0xBC          # `ON PAD <pad> OF <menu>`; context-local under this lead
 
 # ORACLE round-25 forced_rules[0] (r1/r2; CMD_SWEEP RUN=43 row): lead 0x43 =
 # RUN / `!` — the WHOLE command line verbatim as ONE fb string; casing is
@@ -345,14 +350,21 @@ ACTIVATE_WIN_SAME = 0xCF  # 74 2c cf <name> = ACTIVATE WINDOW <name> SAME (f21);
 # DELIMITED's (r48-valsweep: `APPEND FROM t SDF` -> 0615fb010074d0,
 # TYPE FOXPLUS -> …d4bd, TYPE XL5 -> …d4bb, TYPE XLS -> …d4c7,
 # TYPE DELIMITED -> …d4be). The optional d4 records only that the source
-# spelled the word TYPE (r47-typeword).
+# spelled the word TYPE (r47-typeword). r120-aptrail: CSV is 0xd5, the
+# same byte COPY TO already spends (COPY_TYPE_WORDS); APPEND FROM GENERAL
+# is a compiler diagnostic, not this slot.
 FILE_TYPE_WORDS = {0xD0: "SDF", 0xBE: "DELIMITED", 0xC7: "XLS",
-                   0xBB: "XL5", 0xBD: "FOXPLUS"}
+                   0xBB: "XL5", 0xBD: "FOXPLUS", 0xD5: "CSV"}
 # SHOW WINDOW's own modifier bank, between the 2c and the name (r48-valsweep:
 # `SHOW WINDOW w REFRESH` -> 802cc4f70000, TOP -> 802c29f70000, BOTTOM ->
 # 802c36f70000, SAME -> 802ccff70000). HIDE WINDOW (0x87) takes none of them.
 SHOW_WINDOW_MODIFIERS = {0xC4: "REFRESH", 0x29: "TOP", 0x36: "BOTTOM",
                          0xCF: "SAME"}
+# MOUSE trailing key/button flags after the coordinate pair (r121-mouse):
+# CONTROL c9, SHIFT c8, ALT c7, LEFT 58, RIGHT 59, MIDDLE 55. Corpus
+# carriers are CONTROL SHIFT (`c9 c8`).
+MOUSE_KEY_FLAGS = {0xC9: "CONTROL", 0xC8: "SHIFT", 0xC7: "ALT",
+                   0x58: "LEFT", 0x59: "RIGHT", 0x55: "MIDDLE"}
 POPUP_SHORTCUT_MARK = 0x57  # SHORTCUT flag (g1 isolation — pre-run cc/57 guess REFUTED)
 POPUP_RELATIVE_MARK = 0xCC  # RELATIVE flag (g2 isolation)
 BAR_PROMPT_MARK = 0x22        # BAR PROMPT fc<str>fd (g3)
@@ -447,6 +459,11 @@ PARAM_OF_MARK = 0xC3          # typed parameter 'As Class Of library': c3 fb<lib
 #      probes/oracle_harvest/round26_findings.json + round26_streams.json;
 #      corpus-aligned on _reportlistener.vcx::_reportlistener::preparefrxswapcopy) ----
 CREATE_LEAD = 0x13            # bare CREATE <name> = 13 fb<name> (CMD_SWEEP);
+CREATE_FORM_KW = 0x26         # 26 under lead 0x13: CREATE FORM (r125-cr26);
+CREATE_CLASS_KW = 0x4F        # 4f under lead 0x13: CREATE CLASS (r126-cr4f);
+CREATE_FORM_NOWAIT = 0x3A     # NOWAIT after the FORM name
+CREATE_FORM_SAVE = 0x25       # SAVE
+CREATE_FORM_DEFAULT = 0x0E    # DEFAULT. Compiler order is 3a 25 0e.
                               # byte doubles as the FOR clause under lead 7e
                               # (SCAN) — context decides. CURSOR owns 0x68.
 CREATE_REPORT_KW = 0x33       # 33 under lead 0x13: CREATE REPORT (round-26 c3);
@@ -603,6 +620,11 @@ SQL_INTOTABLE_MARK = (0xBC, 0x31)  # INTO TABLE (<expr>) vs INTO CURSOR bc bd
 SQL_LIKE_MARK = 0xCF     # comparison closer binding `43 <l> <r> cf` = LIKE
                          # (round-34 lane A: mhxpcontrol.vcx extwindow s0 stmt3 /
                          # text s6 stmt10 <-> stored '… WHERE EXTTYPE LIKE SQLTYPE …')
+SQL_IN_MARK = 0xD5       # IN-list closer binding `43 <lhs> <ff00> d5` = IN
+                         # (round-104: r104-binlit matrix; bare d5 has no
+                         # shipped reading — JUSTPATH rides `ea d5` — so the
+                         # IN arm engages only on a two-deep stack topped by
+                         # an ff00 list and every other d5 keeps refusing)
 SQL_INTOARRAY_MARK = (0xBC, 0x04)  # INTO ARRAY <sym> tail `bc 04 f7 <u16>` beside the
                                    # INTO CURSOR bc bd spelling (round-34 lane A, same
                                    # two carriers; cf. COPY TO ARRAY '11 28 04 f7')
@@ -626,7 +648,9 @@ PUBLIC_LEAD = 0x37   # 37 <name-list> mirrors LOCAL grammar (ARGJOIN names)
 # off the compile. Each verb's clause bytes are the estate-wide ones: 28 TO,
 # 15 FROM, 03 the ALL scope, 18 LIKE / bc EXCEPT.
 TYPE_LEAD = 0x4F         # TYPE [TO PRINTER] <file>
-COMPILE_LEAD = 0x83      # COMPILE [DATABASE] <name>
+COMPILE_LEAD = 0x83      # COMPILE [DATABASE|FORM|CLASSLIB|REPORT|LABEL] <name>
+COMPILE_KINDS = {0xC2: "DATABASE", 0x14: "FORM", 0x52: "CLASSLIB",
+                 0x33: "REPORT", 0x32: "LABEL"}
 RUNSCRIPT_LEAD = 0x92    # RUNSCRIPT <file>
 LOAD_LEAD = 0x2C         # LOAD <module>
 CALL_LEAD = 0x0A         # CALL <module>
@@ -649,6 +673,13 @@ BUILD_KINDS = {0xC5: "PROJECT", 0xBD: "APP", 0xBE: "EXE",
 BUILD_RECOMPILE_WORD = 0xCB
 SAVE_RESTORE_KINDS = {0x1A: "MACROS", 0x26: "SCREEN", 0x2C: "WINDOW"}
 ALL_QUALIFIERS = {0x18: "LIKE", 0xBC: "EXCEPT"}
+# r136-save: the MEMO word SAVE TO and RESTORE FROM spend when the
+# destination is a memo field instead of a file. It sits between the
+# direction mark and the name; the name behind it rides the same bare-symbol
+# or fc..fd-group operand bank the file name uses, and the ALL LIKE / EXCEPT
+# and ADDITIVE tails follow it unchanged. The same 1b SCATTER / COPY spend
+# for their own MEMO word.
+SAVE_RESTORE_MEMO_MARK = 0x1B
 
 UPDATE_SQL_LEAD = 0x70   # r50-leadsweep: UPDATE <t> [FROM <s>] SET <c> = <e> …
 SQL_DELETE_LEAD = 0x71   # r52-sqldelete: DELETE FROM <target> [WHERE <cond>].
@@ -675,6 +706,11 @@ DROP_LEAD = 0x6A         # DROP TABLE 31 / DROP VIEW c4
 SQL_SET_MARK = 0xCA      # the SET mark; the same ca INDEX TAG spends
 SQL_WHERE_MARK = 0xC6    # the WHERE mark SELECT-SQL's own WHERE carries
 DROP_KINDS = {0x31: "TABLE", 0xC4: "VIEW"}
+# ALTER TABLE's keyword slot behind the table name. Constraint DROPs
+# (c2 cd CHECK, c2 cb PRIMARY KEY, …) put something other than d5
+# behind the keyword and stay refused. DROP's column slot is bare.
+ALTER_TABLE_KEYWORDS = {0xC0: "ADD", 0xBC: "ALTER", 0xC2: "DROP"}
+ALTER_TABLE_BARE_KEYWORDS = frozenset({"DROP"})
 
 # r50-leadsweep — the data-command bank. Each verb's clause bytes are the
 # estate-wide ones: 28 TO, 15 FROM, 20 ON, 13 FOR, d1 WITH, 11 FIELDS, 14 FORM,
@@ -1058,6 +1094,9 @@ EXTERNAL_KINDS = {0x04: "ARRAY", 0x12: "FILE", 0x14: "FORM", 0x1C: "MENU",
 EXTERNAL_ARRAY_CLAUSE = 0x04
 
 AT_LEAD = 0x04
+AT_CLEAR_MARK = 0x0C  # operandless CLEAR under lead 0x04 (r145-atclear).
+                     # Same byte is DIV in expressions and CASE under 0x18;
+                     # statement-level CLEAR keeps lead 0x0e.
 AT_SAY_MARK = 0xC4
 AT_PICTURE_MARK = 0xC2
 
@@ -1380,6 +1419,10 @@ PUSH_POP_MENU_IDS = {
 }
 PACK_LEAD = 0x33     # bare PACK — ORACLE-measured (CMD_SWEEP.md row PACK, snippet
                      # 'PACK'); corpus-aligned at systeminfo.scx::frmSysinfo.
+PACK_MEMO_MARK = 0x1B  # MEMO under lead 0x33 (r142-pack). Same byte and word
+                       # as SCATTER/GATHER 5e/5f, MODIFY 2f, COPY 11 and
+                       # SAVE/RESTORE. Siblings 0x31 DBF and 0xC2 DATABASE
+                       # are oracle-measured, uncarried, and stay refused.
 # SEEK — ORACLE-MEASURED r77-seek (55 programs). The whole clause bank is
 #   45 [16 <alias>] [c3 <index>] [c3 <cdx>] [bd|3c] fc <expr>
 # and the search expression is LAST, its fc group running UNCLOSED to the end
@@ -1457,6 +1500,10 @@ SQLSEL_TOP_MARK = 0x29  # SELECT TOP n: 29 fc <n> [fd] before INTO (r42-seltop).
                         # Collides with GO TOP 0x29; SQL-local.
 INSERT_FROM_NAME = 0x4A  # INSERT INTO <t> FROM NAME <obj>: 15 4a <name>
                          # beside the c2 MEMVAR selector (r47-insertforms)
+INSERT_ARRAY_MARK = 0x04  # INSERT INTO <t> FROM ARRAY <arr>: 15 04 <operand>
+                         # (r111-insert). Same byte as CREATE_ARRAY_MARK /
+                         # CALC_TO_ARRAY_MARK / SQL INTO ARRAY; position
+                         # under the 72 bc INSERT tail decides.
 INSERT_BLANK_LEAD = 0x28  # INSERT BLANK is 28 08; BEFORE appends be
 INSERT_BLANK_MARK = 0x08
 INSERT_BEFORE_MARK = 0xBE
@@ -2033,8 +2080,9 @@ SYSVAR_READ = 0xED
 # 27 programs, PUT + value + STORE rows each): 0x50 _INCSEEK, 0x51 _PAGETOTAL,
 # 0x53 _TOOLBOX, 0x58 _MENUDESIGNER, 0x59 _TOOLTIPTIMEOUT — every one rides
 # `ed <id>` on all three channels, every previously-mapped id confirmed
-# unchanged. The remaining gaps (0x2c-0x2e, 0x4a-0x4c, 0x4f, and past 0x59)
-# stay unmapped: 60 further candidate names all rode the `f7` memvar channel.
+# unchanged. r122-sys4b: 0x4b is _OBJECTBROWSER (value / PUT / STORE).
+# `_TASKLIST` compiles to 0x4a and `_CODESENSE` to 0x4f; both stay outside
+# this bank. Remaining gaps: 0x2c-0x2e, 0x4a, 0x4c, 0x4f, and past 0x59.
 SYSTEM_VARS = {
     0x00: "_ALIGNMENT", 0x01: "_BOX", 0x02: "_INDENT", 0x03: "_LMARGIN",
     0x04: "_PADVANCE", 0x05: "_PAGENO", 0x06: "_PBPAGE", 0x07: "_PCOLNO",
@@ -2054,7 +2102,8 @@ SYSTEM_VARS = {
     0x3E: "_ASCIICOLS", 0x3F: "_ASCIIROWS", 0x40: "_BROWSER",
     0x41: "_SCCTEXT", 0x42: "_COVERAGE", 0x43: "_VFP", 0x44: "_GALLERY",
     0x45: "_GETEXPR", 0x46: "_INCLUDE", 0x47: "_GENHTML",
-    0x48: "_RUNACTIVEDOC", 0x49: "_SAMPLES", 0x4D: "_FOXCODE",
+    0x48: "_RUNACTIVEDOC", 0x49: "_SAMPLES", 0x4B: "_OBJECTBROWSER",
+    0x4D: "_FOXCODE",
     0x4E: "_FOXTASK", 0x50: "_INCSEEK", 0x51: "_PAGETOTAL",
     0x52: "_FOXREF", 0x53: "_TOOLBOX", 0x54: "_TASKPANE",
     0x55: "_REPORTBUILDER", 0x56: "_REPORTPREVIEW", 0x57: "_REPORTOUTPUT",
@@ -2197,6 +2246,7 @@ DEFINE_POPUP_CLAUSES = (
     (DEFINE_FROM_MARK, "pair", "FROM"),
     (0x28, "pair", "TO"),
     (BAR_PROMPT_MARK, "prompt", "PROMPT"),
+    (DEFINE_WIN_FONT, "pair", "FONT"),  # r143-popupfont: FONT face[, size]
     (BAR_MESSAGE_MARK, "group", "MESSAGE"),
     (DEFINE_WIN_TITLE, "group", "TITLE"),
     (WIN_SCHEME_MARK[0], "scheme", "COLOR SCHEME"),
@@ -2226,6 +2276,16 @@ DEACTIVATE_POPUP_LEAD = 0x75  # 75 c6 f7<sym> (e06; c79070eeff459e07:25#126)
 # no mark at all.
 DEACTIVATE_WORDS = {0x1C: "MENU", 0x2C: "WINDOW", 0xC6: "POPUP"}
 MOVE_POPUP_LEAD = 0x7A        # 7a c6 f7<sym> 28 fc<row>fd 07 fc<col> (e06; …:25#121)
+# r138-move: the MOVE bank measured whole. The keyword byte selects the object,
+# the name behind it rides the four spellings the name slot takes (a bare f7
+# symbol, a single-quoted fb literal, a double-quoted d9 one, and the
+# statement's own fc <expr> 03 fd name expression), and the tail is one of the
+# two coordinate marks — each a row group, the 07 joiner and a column group —
+# or the lone CENTER word.
+MOVE_KINDS = {0xC6: "POPUP", 0x2C: "WINDOW"}
+MOVE_BY_MARK = 0x38           # MOVE <obj> <name> BY <drow>, <dcol>
+MOVE_COORD_MARKS = {TO_MARK: "TO", MOVE_BY_MARK: "BY"}
+MOVE_CENTER_WORD = 0xBD       # MOVE <obj> <name> CENTER
 #
 # `DEFINE BAR <system-menu constant>` puts the constant in the bar-NUMBER slot as
 # `fc ec <id> fd` instead of a numeric literal. The table below is the CURRENT

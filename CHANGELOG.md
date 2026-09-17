@@ -3,6 +3,41 @@
 FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the version in
 `pyproject.toml`.
 
+## 0.7.0 — 2026-09-17
+
+Wave 4 on the development split of the second corpus, seals still shut.
+Fifty-two refusal classes closed one at a time; this is not a wave close
+and the held-out splits were not reopened.
+
+- Development split of the second corpus: 103,317 of 103,363 sections
+  lift with zero leaked bytes (0.6.0: 103,015). Blocked sections on the
+  lift census fell from 348 to 46; the per-record blockers census reads
+  45 sections in 40 classes over 42 records (0.6.0: 348 in 92 over 257).
+  Compiled programs 5,296 of 5,476 (0.6.0: 5,266). Not one repository
+  regressed.
+- Authored population 1,876 of 1,917 equal, 0 regressed by name against
+  every frozen checkpoint. Member conservation holds on both corpora
+  with zero no-trace members; named refusals on the second corpus fell
+  from 474 at the wave-3 close to 156.
+- First-corpus pins unmoved: 10,514 of 10,514 development method
+  sections, 2,007 of 2,007 validation, 1,971 system.app CLI, 522 writer
+  fence. Four named refusals remain on corpus 1.
+- Statement banks measured and read: PACK MEMO; ALTER TABLE DROP COLUMN
+  with a bare column slot; SHOW WINDOW ALL and the modifier-before-IN
+  form; DEFINE POPUP FONT and quoted IN; CLOSE DEBUGGER; ON SELECTION
+  and ON BAR; CREATE DATABASE, CREATE FORM and CREATE CLASS; COMPILE
+  FORM; APPEND FROM CSV and APPEND GENERAL; REPLACE WHILE/REST/NEXT/
+  ADDITIVE; ACTIVATE WINDOW TOP/BOTTOM/NOSHOW; WAIT WINDOW TO; @ CLEAR
+  and @ COLOR; DOCK NAME; LOCATE RECORD n; DO CASE OTHERWISE with no
+  CASE; DOEVENTS FORCE; multiple CATCH in one TRY; SAVE TO / RESTORE
+  FROM MEMO; MOVE; MOUSE modifier flags; INSERT INTO FROM ARRAY.
+- Expression and SQL residue: the unterminated 43-group, array-element
+  property tails, IIF/MAX close, SQL HAVING SUM, and FROM/JOIN table
+  atoms.
+- Sealed splits were not opened. Held-out figures in 0.6.0 (1,023 of
+  1,030 on corpus 1, 13,845 of 13,978 on corpus 2) are still the last
+  sealed readings. The wave-4 close is what re-measures them.
+
 ## 0.6.0 — 2026-09-12
 
 The wave-3 close: five decoder lanes measured together on one tree, both sealed
