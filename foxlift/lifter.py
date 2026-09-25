@@ -720,6 +720,35 @@ class RecallScopeStmt:
 
 
 @dataclass
+class BlankScopeStmt:
+    """Scoped BLANK spellings behind bare `93` (r184-blank, lead 0x93).
+
+    The bank mirrors the xbase DELETE scope walk (r54-inalias) plus the
+    FIELDS list BLANK adds: the IN work area wires FIRST under the lead
+    regardless of source order, then the FIELDS list, then NOOPTIMIZE
+    ahead of the scope word (03 ALL, 24 REST, 1e-counted NEXT,
+    23-counted RECORD), then the FOR unit (`13 fc`), then the WHILE
+    unit (`2b fc`). Units are fd-separated with no trailing fd.
+    kind="" — no scope word at all, the clause fields alone.
+    Emission restores source order (FIELDS, scope, FOR, WHILE, IN,
+    NOOPTIMIZE) like DeleteScopeStmt. The compiler normalises
+    WHILE-first sources to FOR-first on the wire while the table
+    numbers by source order, so the sym-taps recover the written
+    order — but WHILE-first emission is gated on no other clause
+    (the only proven shape is the matrix's WHILE-before-FOR row);
+    with any present the canonical order is emitted and a renumbering
+    shape fails frame-equal loudly."""
+    kind: str
+    target: object = None      # the NEXT/RECORD count
+    fields: list | None = None  # the FIELDS list when wired
+    cond: object = None        # the FOR condition when wired
+    alias: str | None = None   # the IN work area
+    while_cond: object = None
+    nooptimize: bool = False
+    while_first: bool = False  # the source wrote WHILE before FOR
+
+
+@dataclass
 class EraseStmt:
     """ERASE — lead 20. Two measured operand spellings: the command-sweep bound
     literal-name form (`20 fb <len> <bytes>`, authored 'ERASE ers1.txt') and the
@@ -729,6 +758,20 @@ class EraseStmt:
     bytecode trace and so is never emitted."""
     name: object          # literal filename str, or the decoded operand AST node
     recycle: bool = False
+
+
+@dataclass
+class RenameClassStmt:
+    """RENAME CLASS <name> [OF <library>] TO <new name> — 4f under lead 3d,
+    the CLASS subcommand byte MODIFY / ADD / REMOVE spend. The name takes
+    MODIFY CLASS's four shapes (bare symbol, quoted, parenthesised group,
+    `?`); the library behind the c3 OF mark and the new name behind the 28
+    TO mark take the format's file-name pair. OF is optional and the
+    compiler stores `OF … TO …` whatever order the source wrote; OVERWRITE
+    leaves no trace."""
+    name: str               # class name in MODIFY CLASS's four shapes
+    library: str = None     # file-name pair behind c3, None when no OF stood
+    new: str = None         # file-name pair behind 28
 
 
 @dataclass
@@ -858,10 +901,14 @@ class AppendMemoStmt:
     """APPEND MEMO <field> FROM <file> [OVERWRITE] — round-28 W4,
     carrier-settled: `06 1b f7<field> 15 <fb/d9 | fc-group>` + optional c5
     ('APPEND MEMO Source FROM (lcFileName) OVERWRITE' _webview refreshsource
-    s0 stmt21; same shape at _reports.vcx line 743). c5 = OVERWRITE."""
+    s0 stmt21; same shape at _reports.vcx line 743). c5 = OVERWRITE.
+    r180-appendmemo: an UNGROUPED fb operand is the bare, unquoted filename
+    spelling (the r47-appendfrom law on the sibling arm); every quoted
+    spelling groups behind fc instead."""
     field_name: str
     source: object
     overwrite: bool = False
+    bare_name: bool = False       # ungrouped fb: the unquoted filename
 
 
 @dataclass
@@ -1173,7 +1220,7 @@ class MkdirStmt:
 
 @dataclass
 class ListToFileStmt:
-    """LIST [MEMORY|STATUS] [LIKE <skeleton>] TO [FILE] <target> [NOCONSOLE].
+    """DISPLAY|LIST [MEMORY|OBJECTS|STATUS] [LIKE <pattern>] TO [FILE] <target> [NOCONSOLE].
 
     Round-29 corpus faa199b32ddf0b1c s15 stmt21 pins the bare spelling
     'LIST TO FILE (...) NOCONSOLE' with NOCONSOLE bound to the exact measured
@@ -1181,11 +1228,17 @@ class ListToFileStmt:
     to stored lines L3306/L3310) force three clause bytes: 1b=MEMORY,
     cb=STATUS and 18 <fb-string>=LIKE skeleton; both carriers end bare 39, the
     same NOCONSOLE marker without its operand. Each shape emits its OWN measured
-    wording: plain TO under a clause byte, TO FILE on the bare form."""
+    wording: plain TO under a clause byte, TO FILE on the bare form.
+    r154-displist: DISPLAY (0x17) shares the frame with a second lead, adds
+    the 2e=OBJECTS sub-word, and reads LIKE as a bare skeleton or a grouped
+    fc..fd operand behind MEMORY and OBJECTS only."""
+
     target: object
     noconsole: bool = False
-    clause: str | None = None        # measured clause word: MEMORY / STATUS
-    like_pattern: str | None = None  # LIKE skeleton, emitted as a bare word
+    clause: str | None = None        # measured clause word: MEMORY / OBJECTS / STATUS
+    like_pattern: object = None      # LIKE skeleton string, or an fc-group node
+    verb: str = "LIST"               # the lead that opened the frame
+    like_group: bool = False         # the LIKE operand carries its own parens
 
 
 @dataclass
@@ -1280,6 +1333,15 @@ class LoopStmt:
 @dataclass
 class ExitStmt:
     pass
+
+
+@dataclass
+class StrayEndifStmt:
+    """An ENDIF with no IF open: VFP9 writes it as a bare b8 (r203-b8err).
+
+    Its own node, never the shared ENDIF tuple: an orphan 1e sentinel must
+    keep failing the emitter, and only the b8 lead proves a stray closer.
+    """
 
 
 @dataclass
@@ -1436,7 +1498,10 @@ class DoCase:
     clauses: list
     t_first: int = -1     # measured opener targets (verified at walk time)
     t_end: int = -1
-    otherwise_body: list | None = None
+    # r178-othchain: one body per OTHERWISE mark, in wire order. The keyword
+    # compiles to its own mark and the marks chain, so a frame carries a RUN
+    # of OTHERWISE clauses, not at most one (empty list = no OTHERWISE).
+    otherwise_bodies: list = field(default_factory=list)
     # round-35 zero-width region (pidocchk CdQuery L34/L35): an opener whose two
     # words are EQUAL declares no clause region; only complete nested frames sit
     # between it and its own ENDCASE, walked into this body (None = normal form).
@@ -1747,12 +1812,16 @@ class DefineStmt:
             system-menu constant (fc ec<id> fd). PICTRES is 5f fc ec <id>
             (fd stripped when last) or 5f fc <expr>. r96-defbarc9: SKIP
             also spells bare `c9` (unconditional skip, no FOR group).
-    PAD:    73 bc f7<name> c3 ec 02 [22 PROMPT][c9 13 SKIP FOR]
+    PAD:    73 bc f7<name> | ec<id> c3 ec 02 [22 PROMPT][c9 13 SKIP FOR]
             [0d 4e COLOR SCHEME][17 KEY][05 AT][40 FONT][41 STYLE]
             [1d MESSAGE][c7 MARK][be BEFORE][54 58 NEGOTIATE LEFT]
             (r43-pad). OF _MSYSMENU is the only measured menu id
-            (PUSH_POP_MENU_IDS 0x02)."""
-    kind: str                       # "WINDOW" | "POPUP" | "BAR"
+            (PUSH_POP_MENU_IDS 0x02).
+    MENU:   73 1c <name> [06 BAR][05 c1 AT LINE <group>][1d MESSAGE]
+            [0d 4e COLOR SCHEME][c7 MARK][17 KEY fb<text>[07 <label>]]
+            [16 IN WINDOW <name>][d2 NOMARGIN] in canonical wire order
+            (r186-definemenu)."""
+    kind: str                       # "WINDOW" | "POPUP" | "BAR" | "PAD" | "MENU"
     name: str = ""
     frm: list = field(default_factory=list)
     flags: list = field(default_factory=list)   # clause words in measured wire order
@@ -1777,6 +1846,7 @@ class DefineStmt:
     neighbour_word: str | None = None
     mark: object = None             # PAD: MARK <expr> (r43-pad)
     before_name: str = ""           # PAD: BEFORE <pad>
+    after_name: str = ""            # PAD: AFTER <pad> (r191-padafter)
     negotiate: str = ""             # PAD: NEGOTIATE LEFT
 
 
@@ -1791,9 +1861,11 @@ class ActivatePopup:
     the paren frame with any trailing clause remains Unsupported.
     r108-popup: the `06 <fc-group>` BAR tail behind a bare, paren or
     system-id name, and the system-id (`ec`) name operand the shared
-    menu-namespace bank reads. A quoted (`fb`/`d9`) name stays refused:
-    round-33's negative gate pins the popup name slot to the `f7`
-    symbol and no carrier fully unblocks on a quoted name."""
+    menu-namespace bank reads. r188-popupstr: a double-quoted (`d9`) name
+    reads beside the keyword (carrier: the `74 c6 d9 <u16 len> <bytes>`
+    plain frame); a single-quoted/bracket (`fb`) name stays refused —
+    no corpus section holds that frame. Tails behind a quoted name (BAR,
+    AT, NOWAIT, REST) stay refused with it: measured, none held."""
     name: str
     at: object = None              # (row, col) expressions when the 05 tail rode the wire
     bar: object = None             # BAR <expr> group when the 06 tail rode the wire
@@ -1930,7 +2002,11 @@ class CreateStmt:
     carries a lone d1 with no REMOTE marker, so both markers are optional and
     each renders only when its byte was present.
     remote/share record which marker bytes the stream carried."""
-    name: str | None = None       # bare form
+    name: str | None = None       # bare form; "" when no operand stood
+                                  # (r159-cr13bare: `13` alone is the
+                                  # operand-less verb, the DATABASE "" precedent)
+    create_from: str | None = None  # FROM <structure file>, the 15 operand
+                                  # (r174-crfc: keyword-less CREATE's FROM)
     report_file: object = None    # REPORT form
     report_from: object = None
     sql_view: str | None = None   # SQL VIEW form
@@ -1952,6 +2028,8 @@ class CreateStmt:
     cls_of: str | None = None     # OF <classlib>
     cls_as: str | None = None     # AS <base>
     cls_from: str | None = None   # FROM <classlib>
+    classlib: str | None = None   # CREATE CLASSLIB file name (r169-cr52);
+                                  # "" when the keyword stood alone
 
 
 @dataclass
@@ -2008,6 +2086,7 @@ class BrowseWindow:
     # order — operand None for a flag. The five attributes above are the ones
     # rounds 24/28/31 named, kept so their carriers and pins read unchanged.
     clauses: list = field(default_factory=list)
+    verb: str = "BROWSE"  # r182-editbrowse: which lead carried the clause list
 
 
 @dataclass
@@ -2025,6 +2104,9 @@ class Dim:
     # dimension tail and the ObjectChain call links already do. Default False
     # keeps the paren form for constructors that carry no closer.
     bracket: bool = False
+    # r150-dimas: the declarator's own AS-clause type ('DIMENSION a(2) AS
+    # Double'), None when the declarator carries no 0x51 tail.
+    as_type: str | None = None
 
 
 @dataclass
@@ -2032,8 +2114,9 @@ class DimList:
     """Round-28: several DIMENSION declarators in one statement joined by the
     ARGJOIN byte — 'DIMENSION This.laTextures(lnLine), This.laFiles(lnLine)'
     (dashboard2.scx::frmcontrol stmt12 -> 15 f4..f6.. fc..fd 03 07 f4..f6..
-    fc..fd 03). Each item is (name, dims, bracket) with single-Dim semantics —
-    the spelling is PER DECLARATOR, so one statement may mix both."""
+    fc..fd 03). Each item is (name, dims, bracket, as_type) with single-Dim
+    semantics — the spelling AND the type are PER DECLARATOR, so one statement
+    may mix both."""
     items: list
 
 
@@ -2152,6 +2235,7 @@ _DECLARE_TYPES = {
     S.DECLARE_TYPE_STRING: "STRING",
     S.DECLARE_TYPE_SHORT: "SHORT",
     S.DECLARE_TYPE_OBJECT: "OBJECT",
+    S.DECLARE_TYPE_DOUBLE: "DOUBLE",
 }
 
 _BINOP = {S.ADD: "+", S.SUB: "-", S.MUL: "*", S.DIV: "/", S.POW: "^",
@@ -3971,21 +4055,34 @@ def _as_class_name(marker, text):
 # takes — and only the modifiers measured here are admitted.
 # r76-unlock: UNLOCK left this table for an arm of its own — its 03 ALL is one
 # member of a three-clause bank, not a lone modifier byte.
+# r183-flush: FLUSH left this table for an arm of its own — its operand is a
+# group, not a lone modifier byte (the r76-unlock precedent for 0x5A).
+# r184-blank: BLANK left this table for an arm of its own — its clause
+# bank is the xbase record-scope bank plus a FIELDS list, not a lone
+# modifier byte (the r76-unlock precedent for 0x5A).
 _R50_BARE_COMMANDS = {
     0x07: ("ASSIST", {}),
     0x0D: ("CHANGE", {}),
     0x16: ("DIR", {}),
-    0x17: ("DISPLAY", {0x1B: "MEMORY", 0xCB: "STATUS"}),
-    0x19: ("EDIT", {}),
+    # r154-displist: DISPLAY left this table for an arm of its own — its
+    # 2e OBJECTS sub-word carries a TO/LIKE/NOCONSOLE clause bank, not a
+    # lone modifier byte (the r76-unlock precedent for 0x5A).
+    # r182-editbrowse: EDIT left this table for `_dec_browse` — its bank is
+    # BROWSE's clause list, not a lone modifier byte. The bare `19` still
+    # lifts, through the reader's own end == 1 arm.
     0x1A: ("EJECT", {0xBE: "PAGE"}),
     0x41: ("RESUME", {}),
     0x58: ("RETRY", {}),
     0x59: ("LOGOUT", {}),
-    0x5B: ("FLUSH", {0xCA: "FORCE"}),
-    0x93: ("BLANK", {}),
     0x94: ("RESET", {}),
     0x9C: ("ROLLBACK", {}),
 }
+
+# r154-displist: the family member the DISPLAY/LIST statement reports on.
+# One bank, both leads — 2e is the OBJECT keyword byte the format already
+# spends in REPORT_OBJECT_KW, READ_EXPR_WORDS, DECLARE_TYPE_OBJECT and
+# ADD OBJECT.
+_DISPLAY_LIST_WORDS = {0x1B: "MEMORY", 0x2E: "OBJECTS", 0xCB: "STATUS"}
 
 # BEGIN / END TRANSACTION each spend a `bd` keyword byte; VFP has no bare
 # BEGIN or END statement, so the one-byte spelling has no producer.
@@ -4307,6 +4404,31 @@ def _typed_extension(name, buf, t, end, syms, what):
     return (name, typ, _as_class_name(lib_marker, lib)), t
 
 
+def _dim_as_type(buf, t, end):
+    """One DIMENSION declarator's AS-clause tail (r150-dimas).
+
+    The format's universal AS clause — 51 (fb | d9) <u16len> <text> — at the
+    byte AFTER the declarator's own dimension closer, PER DECLARATOR. The
+    spelling bit is r47-localas's, via _as_class_name. Returns (None, t)
+    with t unchanged when no 0x51 stands here, so streams the shipped arm
+    lifts take a byte-identical path. Deliberately NOT _typed_extension:
+    the c3 OF-library tail the compiler also accepts behind this AS has no
+    carrier under lead 0x15, so the reader stops at the payload and the
+    loop's unchanged end/ARGJOIN test keeps a c3 a \"DIMENSION trailing
+    bytes\" refusal; and the mark ALONE with nothing behind it (a type name
+    that preprocessed away, or a parenthesised name expression the compiler
+    discarded) has no carrier under this lead either and stays refused
+    rather than round-tripping the 51 away.
+    """
+    if t >= end or buf[t] != S.AS_CLAUSE_MARK:
+        return None, t
+    if t + 3 > end or buf[t + 1] not in (S.STR, S.STR2):
+        raise Unsupported("DIMENSION AS clause without class")
+    marker = buf[t + 1]
+    txt, t = _dec_str_arg(buf, t + 1, end)
+    return _as_class_name(marker, txt), t
+
+
 def _dec_param_name(buf, t, end, syms):
     """One declaration/parameter name: f7 <sym>, f6 <array/fn name>,
     optionally m.-prefixed via f5 0d f7 <sym>, or — since round-32 —
@@ -4491,23 +4613,74 @@ def _dec_do_with_list(buf, t, end, syms):
     return args, t
 
 
-def _do_clause_symbols(node):
-    """Symbol names a DO FORM TO target or WITH arg can carry (r89-dowith).
+def _do_collect_symbols(node, out):
+    """Append the interned symbol names under a DO FORM clause operand.
 
-    Only the plain spellings the corpus carries — a bare symbol, a memvar
-    (`m.` prefix stripped on either side), or a member path — take part in
-    the order reading; every other node keeps the canonical TO-first
-    emission.
+    Walks composite operands (calls, member paths, array refs, binary and
+    boolean operators, negations, parens, lists) in emission order. The
+    callee of a call is an opcode id, never an interned symbol — DAY and
+    MONTH carry no table entry on any measured row — so only call args
+    are walked. Literals (strings, numbers, bytes, None) intern nothing:
+    the oracle bank proves a quoted WITH arg leaves no table entry.
+    Returns False on a shape outside the measured set; the caller keeps
+    the canonical TO-first emission there, which is today's behavior for
+    those shapes.
     """
+    if node is None or isinstance(node, (bool, int, float, bytes, str)):
+        return True
+    if isinstance(node, (Num, Str, BinHexLit)):
+        # Folded constants and literals (LINENO(), hex/numeric/string
+        # spellings) intern no symbol: the oracle bank's zero-arg calls
+        # leave no table entry.
+        return True
     if isinstance(node, Sym):
         name = node.name
         if name.startswith("m."):
             name = name[2:]
-        return (name,)
+        out.append(name)
+        return True
     if isinstance(node, MemvarRef):
-        return (node.name,)
+        out.append(node.name)
+        return True
     if isinstance(node, MemberPath):
-        return tuple(node.names)
+        out.extend(node.names)
+        return True
+    if isinstance(node, WithRef):
+        # r205-dowithref: a single-.dotted WITH arg (.CAPTION) interns its
+        # name exactly like its WithMemberPath kin — the oracle bank reads
+        # source order in every context, and the frmlibros carrier stores
+        # WITH-first behind one of these.
+        out.append(node.name)
+        return True
+    if isinstance(node, WithMemberPath):
+        out.extend(node.names)
+        return True
+    if isinstance(node, Call):
+        return all(_do_collect_symbols(a, out) for a in node.args)
+    if isinstance(node, ArrayRef):
+        out.append(node.name)
+        return all(_do_collect_symbols(s, out) for s in node.subs)
+    if isinstance(node, (Bin, ShortCircuit)):
+        return (_do_collect_symbols(node.l, out)
+                and _do_collect_symbols(node.r, out))
+    if isinstance(node, (Neg, Not, Paren)):
+        return _do_collect_symbols(node.x, out)
+    if isinstance(node, (list, tuple)):
+        return all(_do_collect_symbols(x, out) for x in node)
+    return False
+
+
+def _do_clause_symbols(node):
+    """Symbol names a DO FORM TO target or WITH arg carries (r89-dowith).
+
+    The plain spellings (a bare symbol, a memvar, a member path) plus the
+    composite operands the corpus carries — calls, array refs, operators —
+    take part in the order reading; any other node keeps the canonical
+    TO-first emission.
+    """
+    out: list = []
+    if _do_collect_symbols(node, out):
+        return tuple(out)
     return ()
 
 
@@ -6058,6 +6231,22 @@ def _dec_group_run(buf, i, end, syms, stack, opens_first_packet=False):
                 raise Unsupported(f"ea builtin callee 0x{ident:02x} unmapped")
             bounds = S.MEASURED_EA_GROUP_CLOSERS.get(ident)
             if bounds is not None and not bounds[0] <= len(stack) <= bounds[1]:
+                if _EXPR_RETRY_ACTIVE and ident in S.EA_STRANDED_PAIR_CLOSERS \
+                        and len(stack) == 1 and len(stack) < bounds[0] \
+                        and i + 1 < end and buf[i + 1] == S.CALL_OPEN \
+                        and not isinstance(stack[0], EmptyArg):
+                    # r179-eastrand: this frame opened the `43 43` pair whose
+                    # inner half is an ELEMENT PACKET -- a packet that owns no
+                    # closer and therefore consumed the nested callee's own.
+                    # The frame is a strand holding that call's finished value,
+                    # and the ea in front of it names the ENCLOSING frame's
+                    # callee. Close implicitly WITHOUT consuming the closer;
+                    # the enclosing group's loop re-peeks the same ea with the
+                    # arguments it already holds, and ASCAN lands inside its
+                    # measured 2..6. The bare lanes close the same strand at
+                    # _fold_stranded_group and at the window-end lone-value
+                    # close; this is the ea lane's.
+                    return stack[0], j
                 # r42-msgbox: MESSAGEBOX operand count is the emission arity.
                 raise Unsupported(
                     "ea 0x%02X arity rejected at %d args" % (ident, len(stack)))
@@ -7322,10 +7511,20 @@ def _dec_define_window(buf, end, syms):
     # The NAME clause rides BEFORE the position on the wire (f19/d02), so it is
     # read here rather than in the clause loop below.
     if j < end and buf[j] == S.DEFINE_WIN_NAME:
-        if j + 1 >= end or buf[j + 1] != S.FC:
+        # r149-winname: NAME <bare identifier> wires the operand as a bare f7
+        # symbol push, the spelling SCATTER/GATHER NAME, DO FORM's NAME and
+        # DOCK NAME already read bare; a parenthesised operand keeps the fc
+        # group (f19). Only these two bind — a bare d9 string (d02), an
+        # f5-scoped or f4-dotted symbol, and a 4a with no operand behind it
+        # all compile on the oracle but carry nothing, so they keep the
+        # refusal.
+        if j + 4 <= end and buf[j + 1] == S.SYM:
+            obj_name, j = Sym(_sym(syms, S.u16(buf, j + 2))), j + 4
+        elif j + 1 < end and buf[j + 1] == S.FC:
+            obj_name, j = _fc_group(buf, j + 1, end, syms)
+        else:
             raise Unsupported("DEFINE WINDOW NAME form")
         seen.add("NAME")
-        obj_name, j = _fc_group(buf, j + 1, end, syms)
     if j < end and buf[j] == S.DEFINE_FROM_MARK:
         j += 1
         for idx in range(4):               # FROM row,col TO row,col
@@ -7541,6 +7740,95 @@ def _dec_define_popup(buf, end, syms):
     return DefineStmt("POPUP", name=name, frm=frm, flags=flags, scheme=scheme)
 
 
+def _dec_menu_name(buf, j, end, syms):
+    """One MENU name operand under lead 0x73 (r186-definemenu).
+
+    The name-space spellings the menu clauses already share — a bare `f7`
+    symbol, a parenthesised `fc..03` group, a system-menu id — plus a quoted
+    `fb`/`d9` literal carried BARE beside the word, the way RELEASE's own
+    name slot reads them. That is `_dec_release_name` MINUS the `03` ALL
+    byte, which has no DEFINE spelling. A group with NO paren postfix keeps
+    r48 law 15's rejection. Returns (text, next_index); anything else is
+    this arm's refusal to name.
+    """
+    if j < end and buf[j] in (S.STR, S.STR2):
+        text, k = _dec_str_arg(buf, j, end)
+        return _emit(Str(text, dq=(buf[j] == S.STR2))), k
+    try:
+        name, k = _menu_popup_operand(buf, j, end, syms)
+    except Unsupported:
+        # a truncated or unreadable group is the ARM's refusal to name, not
+        # the shared reader's: each caller keeps its own message
+        name, k = None, j
+    if name is None:
+        raise Unsupported("DEFINE MENU name form")
+    return name, k
+
+
+def _dec_define_menu(buf, end, syms):
+    # r186-definemenu: 73 1c <name> [06 BAR] [05 c1 AT LINE <group>]
+    #   [1d MESSAGE <group>] [0d 4e COLOR SCHEME <group>] [c7 MARK <group>]
+    #   [17 KEY fb<key-text> [07 <label>]] [16 IN WINDOW <name>] [d2 NOMARGIN]
+    # in canonical wire order even when source spells them reversed (q_order1
+    # == q_order2); the word WINDOW after IN leaves no mark, so emission
+    # always renders IN WINDOW (q_noin == q_noin_nowindow, q_carrier ==
+    # q_carrier_nowindow). MENU and MENUS are one frame. A bare 0d COLOR
+    # pairlist and an operand-less trailing 16 compile but stay refused.
+    j = 2
+    name, j = _dec_menu_name(buf, j, end, syms)
+    flags = []
+    for byte, kind, word in S.DEFINE_MENU_CLAUSES:
+        if kind == "scheme":
+            if not (j + 2 <= end and buf[j:j + 2] == bytes(S.WIN_SCHEME_MARK)):
+                continue
+            operand, j = _fc_group(buf, j + 2, end, syms)
+            flags.append("%s %s" % (word, _emit(operand)))
+            continue
+        if kind == "atline":
+            if not (j + 2 <= end and buf[j] == byte
+                    and buf[j + 1] == S.MENU_LINE_MARK):
+                continue
+            operand, j = _fc_group(buf, j + 2, end, syms)
+            flags.append("%s %s" % (word, _emit(operand)))
+            continue
+        if j >= end or buf[j] != byte:
+            continue
+        j += 1
+        if kind == "flag":
+            flags.append(word)
+        elif kind == "group":
+            operand, j = _fc_group(buf, j, end, syms)
+            flags.append("%s %s" % (word, _emit(operand)))
+        elif kind == "key":
+            # the key spelling rides as a raw fb payload (a key EXPRESSION
+            # like ALT+F1, not a value), the optional label as an ordinary
+            # group behind 07 — the shape DEFINE BAR's own KEY slot reads.
+            # Only the measured fb mark binds.
+            if j + 3 > end or buf[j] != S.STR:
+                raise Unsupported("DEFINE MENU KEY form")
+            n = S.u16(buf, j + 1)
+            if j + 3 + n > end:
+                raise Unsupported("DEFINE MENU KEY form")
+            key_text = _payload_text(buf[j + 3:j + 3 + n])
+            j += 3 + n
+            label = None
+            if j < end and buf[j] == S.ARGJOIN:
+                label, j = _fc_group(buf, j + 1, end, syms)
+            flags.append("KEY %s" % key_text
+                         + (", %s" % _emit(label)
+                            if label is not None else ""))
+        else:                                    # kind == "name"
+            try:
+                text, j = _dec_popup_name(buf, j, end, syms)
+            except Unsupported:
+                raise Unsupported("DEFINE MENU IN form")
+            flags.append("%s %s" % (word, text))
+    if j != end:
+        raise Unsupported(
+            "DEFINE MENU clause 0x%02x unmeasured" % buf[j])
+    return DefineStmt("MENU", name=name, flags=flags)
+
+
 _MENU_SHIFTED_BLOCK = False    # section-scoped, set by lift_section (round-40 lane E)
 
 
@@ -7738,10 +8026,11 @@ def _dec_release_pad_name(buf, t, end, syms):
 def _dec_define_bar(buf, end, syms):
     # g3/g4 byte-exact: 73 06 fc<n>fd c3 f7<popup>
     #   [22 fc<PROMPT>fd] [41 fc<STYLE>fd] [1d fc<MESSAGE>fd]
-    #   [17 fb<KEY>[07 fc<label>fd]] [c9 13 fc<SKIP FOR>fd] [c2 fc<PICTURE>fd]
-    # canonical wire order PROMPT -> STYLE -> MESSAGE -> SKIP -> PICTURE
+    #   [c9 13 fc<SKIP FOR>fd] [17 fb<KEY>[07 fc<label>fd]] [c2 fc<PICTURE>fd]
+    # canonical wire order PROMPT -> STYLE -> MESSAGE -> SKIP -> KEY -> PICTURE
     # regardless of source order (round-40 e02 vs e03 compile identically, e11
-    # pins the full run); the LAST present group's fd may be reader-stripped.
+    # pins the run without KEY; r157-barkey ranks KEY behind MARK c7 and in
+    # front of PICTURE c2); the LAST present group's fd may be reader-stripped.
     j = 2
     num, j = _menu_bar_number(buf, j, end, syms)
     # r49-menusweep: the 03 in the number group is the SOURCE's parentheses,
@@ -7757,6 +8046,25 @@ def _dec_define_bar(buf, end, syms):
     of_popup, j2 = _menu_popup_operand(buf, j, end, syms)
     if of_popup is not None:
         j = j2
+    elif j < end and buf[j] == S.STR2:
+        # r187-barlit: the popup named by a double-quoted LITERAL,
+        # carried bare beside the OF mark -- `d9 <u16len> <bytes>`
+        # with no fc group around it, no 03 paren postfix and no
+        # closing fd. The same bare name-space spelling
+        # _dec_release_name reads under lead 3c (r77-release) and SET
+        # MARK OF BAR's owner slot reads behind its second c3
+        # (r89-setvariant). The payload is SOURCE TEXT, never a
+        # symbol -- its case survives and it never enters the symbol
+        # table -- so it re-emits re-quoted double, which recompiles
+        # to the same mark. The single-quoted/bracket fb spelling
+        # compiles but has no carrier and stays refused (r141-onsel's
+        # stance at the neighbouring slot); `OF ("x")` is the
+        # different frame `fc d9 .. 03 fd` and stays on the group
+        # path below.
+        if j + 3 > end or j + 3 + S.u16(buf, j + 1) > end:
+            raise Unsupported("DEFINE BAR popup literal truncated")
+        text, j = _dec_str_arg(buf, j, end)
+        of_popup = _emit(Str(text, dq=True))
     elif j < end and buf[j] == S.FC:
         # r36-D1b: 'OF (m.lcMenuName)' — grouped spelling kept WITH parens
         # (bare f7 <sym> compiles differently, so the spellings are
@@ -7815,22 +8123,6 @@ def _dec_define_bar(buf, end, syms):
     if j < end and buf[j] == S.BAR_MESSAGE_MARK:
         j += 1
         message, j = _fc_group(buf, j, end, syms)
-    if j < end and buf[j] == S.BAR_KEY_MARK:
-        # KEY <key text>[, <label>]: the key spelling rides as a raw fb payload
-        # (it is a key EXPRESSION like CTRL+A, not a value), the optional label
-        # as an ordinary group behind 07 (round-37 D6 with label, round-40 e07
-        # without).
-        if j + 4 > end or buf[j + 1] != S.STR:
-            raise Unsupported("DEFINE BAR KEY clause shape")
-        n = S.u16(buf, j + 2)
-        if j + 4 + n > end:
-            raise Unsupported("DEFINE BAR KEY clause truncated")
-        key_text = _payload_text(buf[j + 4:j + 4 + n])
-        j += 4 + n
-        label = None
-        if j < end and buf[j] == S.ARGJOIN:
-            label, j = _fc_group(buf, j + 1, end, syms)
-        key = (key_text, label)
     if j < end and buf[j:j + 2] == bytes(S.BAR_SKIPFOR_MARK):
         j += 2
         skip_for, j = _fc_group(buf, j, end, syms)
@@ -7847,6 +8139,26 @@ def _dec_define_bar(buf, end, syms):
     if j < end and buf[j] == S.PAD_MARK_CLAUSE:
         j += 1
         mark, j = _fc_group(buf, j, end, syms)
+    if j < end and buf[j] == S.BAR_KEY_MARK:
+        # r157-barkey: KEY is the LAST optional head — behind MARK c7, in
+        # front of PICTURE c2. KEY <key text>[, <label>]: the key spelling
+        # rides as a raw fb payload (it is a key EXPRESSION like CTRL+A,
+        # not a value), the optional label as an ordinary group behind 07
+        # (round-37 D6 with label, round-40 e07 without). Eleven clause
+        # pairs spelled both ways compile to one stream each, so the rank
+        # is the wire's, not the source's; a bare SKIP in front of KEY
+        # wires c9 17, which the c9 13 test above already keeps distinct.
+        if j + 4 > end or buf[j + 1] != S.STR:
+            raise Unsupported("DEFINE BAR KEY clause shape")
+        n = S.u16(buf, j + 2)
+        if j + 4 + n > end:
+            raise Unsupported("DEFINE BAR KEY clause truncated")
+        key_text = _payload_text(buf[j + 4:j + 4 + n])
+        j += 4 + n
+        label = None
+        if j < end and buf[j] == S.ARGJOIN:
+            label, j = _fc_group(buf, j + 1, end, syms)
+        key = (key_text, label)
     if j < end and buf[j] == S.BAR_PICTURE_MARK:
         j += 1
         picture, j = _fc_group(buf, j, end, syms)
@@ -7881,24 +8193,49 @@ def _dec_define_pad(buf, end, syms):
     # FOR / COLOR SCHEME / KEY were the Main.MPX set; AT / FONT / STYLE /
     # MESSAGE / MARK / BEFORE / NEGOTIATE LEFT compiled in the same batch.
     j = 2
-    if j + 3 > end or buf[j] != S.SYM:
+    if j + 3 > end or buf[j] not in (S.SYM, S.MENU_BAR_ID_MARK):
         raise Unsupported("DEFINE PAD name form")
-    name = _sym(syms, S.u16(buf, j + 1))
-    j += 3
+    if buf[j] == S.MENU_BAR_ID_MARK:
+        # r155-padname: the pad NAME is a system-menu PAD constant, a bare
+        # `ec <id>` with no fc wrapper and no fd consumed, read out of the
+        # PAD namespace S.MENU_BAR_IDS — never the popup namespace the c3
+        # OF slot behind it reads. The ec ff wide bank compiles but has no
+        # carrier and stays refused, as do the literal and paren names.
+        name = S.MENU_BAR_IDS.get(buf[j + 1])
+        if name is None:
+            raise Unsupported("DEFINE PAD name form")
+        j += 2
+    else:
+        name = _sym(syms, S.u16(buf, j + 1))
+        j += 3
     if j >= end or buf[j] != S.DEFINE_BAR_OF:
         raise Unsupported("DEFINE PAD OF missing")
     j += 1
-    if j + 2 > end or buf[j] != S.MENU_BAR_ID_MARK:
+    # r167-padof: the menu behind the OF mark is a system-menu constant,
+    # or the source's own parenthesised name expression -- `fc <expr> 03
+    # fd`, the frame r49-menusweep measured in every other menu clause's
+    # name slot. The `03` is the parentheses; a group without one folds to
+    # a bare name that would recompile to `f7 <sym>`, a different frame,
+    # so it stays refused (r48 law 15).
+    if j + 2 <= end and buf[j] == S.MENU_BAR_ID_MARK:
+        of_menu = S.PUSH_POP_MENU_IDS.get(buf[j + 1])
+        if of_menu is None:
+            raise Unsupported(
+                "DEFINE PAD menu id 0x%02x unmeasured" % buf[j + 1])
+        j += 2
+    elif j < end and buf[j] == S.FC:
+        node, j = _fc_group(buf, j, end, syms)
+        if not isinstance(node, Paren):
+            raise Unsupported("DEFINE PAD OF form")
+        of_menu = _emit(node)
+    else:
         raise Unsupported("DEFINE PAD OF form")
-    of_menu = S.PUSH_POP_MENU_IDS.get(buf[j + 1])
-    if of_menu is None:
-        raise Unsupported("DEFINE PAD menu id 0x%02x unmeasured" % buf[j + 1])
-    j += 2
     prompt = skip_for = scheme = key = None
     at = []
     font = []
     style = message = mark = None
     before_name = ""
+    after_name = ""
     negotiate = ""
     seen = set()
     while j < end:
@@ -7969,13 +8306,50 @@ def _dec_define_pad(buf, end, syms):
             seen.add("MARK")
             mark, j = _fc_group(buf, j + 1, end, syms)
         elif buf[j] == S.PAD_BEFORE_MARK:
-            if "BEFORE" in seen:
+            if "BEFORE" in seen or "AFTER" in seen:
                 raise Unsupported("duplicate DEFINE PAD clause")
             seen.add("BEFORE")
-            if j + 4 > end or buf[j + 1] != S.SYM:
+            # r175-padbefore: the neighbour slot is two-valued and the byte
+            # behind the mark decides. A user pad rides `f7 <u16>` into the
+            # section symbol table (r43-pad). A system menu object rides the
+            # bare `ec <id>` of the shared menu-constant bank instead --
+            # flat, three bytes, four behind the `ec ff` escape -- read
+            # through _menu_bar_id_name out of MENU_BAR_IDS, the namespace
+            # _dec_release_pad_name documents one function away. No group,
+            # no kind byte and no `fd` consumed: DEFINE BAR spends the same
+            # neighbour as `be|2d 06 fc ec <id> fd`, DEFINE PAD spends it
+            # short. An id neither table binds stays refused, as do the
+            # popup-namespace ids, the paren group and quoted literals, all
+            # measured with no carrier. BEFORE and AFTER never compose
+            # (r191-padafter nc_both), so either mark behind the other is
+            # the shipped duplicate-clause guard.
+            if j + 3 <= end and buf[j + 1] == S.MENU_BAR_ID_MARK:
+                before_name, j = _menu_bar_id_name(
+                    buf, j + 1, end, "DEFINE PAD BEFORE")
+            elif j + 4 <= end and buf[j + 1] == S.SYM:
+                before_name = _sym(syms, S.u16(buf, j + 2))
+                j += 4
+            else:
                 raise Unsupported("DEFINE PAD BEFORE form")
-            before_name = _sym(syms, S.u16(buf, j + 2))
-            j += 4
+        elif buf[j] == S.PAD_AFTER_MARK:
+            if "BEFORE" in seen or "AFTER" in seen:
+                raise Unsupported("duplicate DEFINE PAD clause")
+            seen.add("AFTER")
+            # r191-padafter: the AFTER twin of the BEFORE slot above. The
+            # carrier spends `2d f7 <u16>` (a user pad); a system menu
+            # object rides the bare `ec <id>` through the same helper and
+            # bank (r175 measured `2d ec 09`). Same widths, same refusals:
+            # an unbound id, the popup-namespace ids, the paren group and
+            # quoted literals stay refused with the AFTER word in the
+            # message.
+            if j + 3 <= end and buf[j + 1] == S.MENU_BAR_ID_MARK:
+                after_name, j = _menu_bar_id_name(
+                    buf, j + 1, end, "DEFINE PAD AFTER")
+            elif j + 4 <= end and buf[j + 1] == S.SYM:
+                after_name = _sym(syms, S.u16(buf, j + 2))
+                j += 4
+            else:
+                raise Unsupported("DEFINE PAD AFTER form")
         elif buf[j] == S.PAD_NEGOTIATE_MARK:
             if "NEGOTIATE" in seen:
                 raise Unsupported("duplicate DEFINE PAD clause")
@@ -7989,7 +8363,8 @@ def _dec_define_pad(buf, end, syms):
     return DefineStmt("PAD", name=name, of_popup=of_menu, prompt=prompt,
                       skip_for=skip_for, scheme=scheme, key=key, at=at,
                       font=font, style=style, message=message, mark=mark,
-                      before_name=before_name, negotiate=negotiate)
+                      before_name=before_name, after_name=after_name,
+                      negotiate=negotiate)
 
 
 def _create_str(buf, j, end, syms, clause):
@@ -8195,14 +8570,48 @@ def _dec_create(buf, end, syms):
     # bare CREATE <name> = 13 fb<name> (CMD_SWEEP); CREATE REPORT =
     # 13 33 <file-group> 15 <from-group> (round-26 c3); groups carry explicit
     # runtime-paren markers and the FINAL fd may be reader-stripped
-    if end < 2:
-        raise Unsupported("CREATE truncated")
+    # r159-cr13bare: the verb alone. `13` with nothing behind it is CREATE
+    # with no operand — the designer's no-name frame, the same shape
+    # round-110 measured one level down for `13 c2`. The reader has already
+    # stripped the statement's `fe`, so a complete operand-less CREATE
+    # arrives as one byte. CREAT and CREA wire the same byte; emission
+    # spells the keyword. `?` is not this frame — it rides the name arm as
+    # `13 fb 0100 3f`. An object keyword behind the verb makes end >= 2 and
+    # keeps its own arm's refusal.
+    if end == 1:
+        return CreateStmt(name="")
     kw = buf[1]
-    if kw in (S.STR, S.STR2):
-        nm, j = _dec_str_arg(buf, 1, end)
+    if kw in (S.STR, S.STR2, S.FC):
+        # r174-crfc: CREATE [<name>] [FROM <structure>] = 13 <name-operand>
+        # [15 <from-operand>], the keyword-less table-building CREATE. The
+        # byte read as kw is not a keyword at all when it is fc — it is the
+        # statement's own expression-group opener standing in the keyword
+        # slot. Both operands take r76-open's two file-name shapes, the same
+        # reader DATABASE, FORM and CLASS's OF/FROM already use: an unquoted
+        # name rides a bare fb string with its source case intact, every
+        # other spelling the statement's own fc group. 15 is the FROM intro
+        # CREATE REPORT's FROM already uses. The shipped bare-d9 reading
+        # stays on _dec_str_arg — no spelling wires a bare 13 d9, and the
+        # shared helper refuses one by design. A group no spelling renders
+        # (bare symbol, no 03) keeps a loud refusal — it would re-emit as a
+        # bare name and recompile to a bare fb (round-32 precedent).
+        if kw == S.STR2:
+            nm, j = _dec_str_arg(buf, 1, end)
+            frm = None
+        else:
+            nm, j = _dec_index_name(buf, 1, end, syms, "CREATE")
+            if buf[1] == S.FC and not _copy_memo_target_measured(buf, 1, j):
+                raise Unsupported("CREATE name form")
+            frm = None
+            if j < end and buf[j] == S.DEFINE_FROM_MARK:
+                g0 = j + 1
+                frm, j = _dec_index_name(buf, g0, end, syms, "CREATE FROM")
+                if buf[g0] == S.FC and not _copy_memo_target_measured(
+                        buf, g0, j):
+                    raise Unsupported("CREATE FROM form")
         if j != end:
             raise Unsupported("CREATE trailing bytes")
-        return CreateStmt(name=nm)
+        return CreateStmt(name=nm, create_from=frm)
     if kw == 0xC4:
         # round-28 W4 carrier-settled: CREATE SQL VIEW <view> REMOTE CONNECTION
         # <conn> SHARE AS <query> = 13 c4 fb<view> d2 d1 fb<conn> c2 51 fb<query>
@@ -8216,6 +8625,27 @@ def _dec_create(buf, end, syms):
         if j + 3 > end or buf[j] not in (S.STR, S.STR2):
             raise Unsupported("CREATE SQL VIEW name form")
         view, j = _dec_str_arg(buf, j, end)
+        # r148-createlocal: behind the view name the connection clause is a
+        # group the command may leave wholly unspelled. When the AS mark
+        # stands there directly — no d2, no d1, no connection-name string,
+        # no c2 — the statement is the LOCAL view, and the query runs as ONE
+        # stored-source string to statement end exactly as it does behind a
+        # connection (Foxis/employee.vcx::employee s2[11]; matrix q_local_min
+        # et al., which also measure a 271-byte query, an embedded
+        # double-quoted literal, UNION and ';'-folded continuation lines all
+        # riding that one string). Only the no-marker shape is carried, so a
+        # lone d2 with no d1 and a statement ending at the view name keep the
+        # loud label below. `remote_connection` stays None — that None is what
+        # the emitter reads as "no connection clause stood".
+        if j < end and buf[j] == S.AS_CLAUSE_MARK:
+            j += 1
+            if j >= end or buf[j] not in (S.STR, S.STR2):
+                raise Unsupported("CREATE SQL VIEW query form")
+            query, j = _dec_str_arg(buf, j, end)
+            if j != end:
+                raise Unsupported("CREATE trailing bytes")
+            return CreateStmt(sql_view=view, as_query=query,
+                              remote=False, share=False)
         remote = False
         if j + 2 <= end and buf[j] == 0xD2 and buf[j + 1] == 0xD1:
             remote = True
@@ -8345,6 +8775,21 @@ def _dec_create(buf, end, syms):
             raise Unsupported("CREATE CLASS trailing bytes")
         return CreateStmt(cls=name, cls_of=cls_of, cls_as=cls_as,
                           cls_from=cls_from, nowait=nowait)
+    if kw == S.CREATE_CLASSLIB_KW:
+        # r169-cr52: CREATE CLASSLIB [<file>] = 13 52 [fb<name> | fc<expr>].
+        # The name takes r76-open's two file-name shapes, the same reader
+        # DATABASE and FORM read: an unquoted name rides a bare fb string
+        # with its source case intact, every other spelling the statement's
+        # own fc group. The word stands alone at 13 52 when no name was
+        # spelled, the designer's no-name frame DATABASE also has. Nothing
+        # follows the one operand — the compiler drops every extra word
+        # without emitting a byte — so a trailing byte keeps the refusal.
+        name, j = None, 2
+        if j < end:
+            name, j = _dec_index_name(buf, j, end, syms, "CREATE CLASSLIB")
+        if j != end:
+            raise Unsupported("CREATE CLASSLIB trailing bytes")
+        return CreateStmt(classlib=name if name is not None else "")
     raise Unsupported("CREATE object 0x%02x unmeasured" % kw)
 
 
@@ -10026,7 +10471,8 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
         sel_kw.append("TOP %s" % _emit(top_n))
     top_txt = " ".join(sel_kw) + " "
     if cols:
-        parts = [_emit(e) + (f" AS {a}" if a else "") for e, a in cols]
+        parts = [_emit_select_col(e) + (f" AS {a}" if a else "")
+                 for e, a in cols]
         # review F1: a mixed projection renders its additional star too;
         # r48-sqlproj: a LEADING star renders before the column list.
         # r74-columns: either star may be qualified (`<alias>.*`).
@@ -10331,8 +10777,13 @@ def _dec_browse_name(buf, t, end, syms, byte, *, literals=False):
     raise Unsupported("BROWSE clause 0x%02x operand form" % byte)
 
 
-def _dec_browse(buf, end, syms):
+def _dec_browse(buf, end, syms, word="BROWSE"):
     """BROWSE: `09` and then a clause list in ONE canonical order.
+
+    r182-editbrowse: EDIT (`19`) shares this reader — its clause bank is
+    BROWSE's, tails byte-identical under both leads — so the head word
+    rides along as a parameter.
+
 
     r53-browsehead measured the envelope over 45 authored programs. Two facts
     decide the reader's shape:
@@ -10357,7 +10808,10 @@ def _dec_browse(buf, end, syms):
     carrier.
     """
     if end == 1:
-        return ("BROWSE",)
+        return (word,)
+    # the clause walk below reuses the name `word` for each clause's source
+    # word, so the head word is saved here before the loop shadows it
+    head = word
     t = 1
     got = {}
     clauses = []
@@ -10423,7 +10877,8 @@ def _dec_browse(buf, end, syms):
     return BrowseWindow(got.get("window"), title=got.get("title"),
                         timeout=got.get("timeout"),
                         fields=got.get("fields") or [],
-                        for_cond=got.get("for_cond"), clauses=clauses)
+                        for_cond=got.get("for_cond"), clauses=clauses,
+                        verb=head)
 
 
 _FOREACH_SUB_STOP = frozenset({S.FD, S.ARGJOIN})
@@ -11212,6 +11667,8 @@ def _dec_statement(buf, syms):
             return _dec_define_bar(buf, end, syms)
         if kw == S.DEFINE_PAD_KW:
             return _dec_define_pad(buf, end, syms)
+        if kw == S.DEFINE_MENU_KW:
+            return _dec_define_menu(buf, end, syms)
         raise Unsupported("DEFINE object 0x%02x unmeasured" % kw)
     if lead == S.ACTIVATE_POPUP_LEAD:
         # round-24 g5 byte-exact: 74 c6 f7<sym>; audit-B order-4: bare 74 26 =
@@ -11281,6 +11738,24 @@ def _dec_statement(buf, syms):
                 if t != end:
                     raise Unsupported("ACTIVATE POPUP frame shape")
             return ActivatePopup(name, bar=bar)
+        # r188-popupstr: quoted popup name — `ACTIVATE POPUP "qq"` wires
+        # the `d9 <u16 len> <bytes>` literal BARE beside the keyword, the
+        # same length-prefixed literal DEFINE POPUP (`73 c6 d9…`,
+        # r112-popupdef), RELEASE POPUP (`3c c6 d9…`, r77-release) and
+        # ACTIVATE MENU (`74 1c d9…`, r108-popup) already read one keyword
+        # byte away. Only the measured double-quote mark binds: single
+        # quotes and brackets both write `fb` (`74c6fb0900…`), which no
+        # corpus section holds. PLAIN frame only — the `06 <group>` BAR
+        # tail, the `05 <group> 07 <group>` AT tail, their canonical
+        # BAR-then-AT combination, the bare `06`, the `3a` NOWAIT and the
+        # `24` REST bytes all compile behind a quoted name but no corpus
+        # section holds one, so any trailing byte stays loud below.
+        if end >= 5 and buf[1] == S.DEFINE_POPUP_KW \
+                and buf[2] == S.STR2:
+            text, t = _dec_str_arg(buf, 2, end)
+            if t != end:
+                raise Unsupported("ACTIVATE POPUP frame shape")
+            return ActivatePopup(_emit(Str(text, dq=True)))
         # r108-popup: ACTIVATE MENU (`74 1c <menu> [bc <pad>] [3a]`). The
         # menu operand rides the shared menu-namespace bank, the `bc` PAD
         # tail the shared PAD bank, the `3a` NOWAIT tail is bare; wire order
@@ -11422,8 +11897,8 @@ def _dec_statement(buf, syms):
                 raise Unsupported("MOVE POPUP trailing bytes")
             return MovePopup(name, row, col, word=word, prep=prep)
         raise Unsupported("MOVE POPUP frame shape")
-    if lead == S.BROWSE_LEAD:
-        return _dec_browse(buf, end, syms)
+    if lead in S.BROWSE_WORDS:
+        return _dec_browse(buf, end, syms, S.BROWSE_WORDS[lead])
     if lead == S.CREATE_CURSOR_LEAD:
         return _dec_create_cursor(buf, end, syms)
     if lead == S.CREATE_LEAD:
@@ -11504,8 +11979,11 @@ def _dec_statement(buf, syms):
         while True:
             lv, t2 = _dec_lvalue(buf, t, end, syms)
             if isinstance(lv, ArrayRef):
-                items.append((lv.name, lv.subs, lv.bracket))
-                t = t2
+                # r150-dimas: the carrier takes this branch — _dec_lvalue
+                # already consumed the declarator's own closer, so t2 is the
+                # AS-clause offset.
+                as_type, t = _dim_as_type(buf, t2, end)
+                items.append((lv.name, lv.subs, lv.bracket, as_type))
             elif isinstance(lv, (Sym, MemberPath, WithMemberPath)):
                 if isinstance(lv, Sym):
                     name = lv.name
@@ -11518,7 +11996,8 @@ def _dec_statement(buf, syms):
                 else:
                     name = ".".join(lv.names)
                 dims, bracket, t = _dim_dims(t2)
-                items.append((name, dims, bracket))
+                as_type, t = _dim_as_type(buf, t, end)
+                items.append((name, dims, bracket, as_type))
             else:
                 raise Unsupported("DIMENSION name form")
             if t == end:
@@ -11527,8 +12006,8 @@ def _dec_statement(buf, syms):
                 raise Unsupported("DIMENSION trailing bytes")
             t += 1
         if len(items) == 1:
-            name, dims, bracket = items[0]
-            return Dim(name, dims, bracket=bracket)
+            name, dims, bracket, as_type = items[0]
+            return Dim(name, dims, bracket=bracket, as_type=as_type)
         return DimList(items)
     if lead == S.WITH:
         if buf[j] != S.FC:
@@ -11991,49 +12470,87 @@ def _dec_statement(buf, syms):
         if t != end:
             raise Unsupported("statement lead 0x24 trailing bytes")
         return HelpStmt(id_expr, nowait, topic)
-    if lead == 0x2B:
-        # LIST: bare form oracle-measured (CMD_SWEEP.md row LIST '2b'); corpus
-        # VFPxWorkbookXLSX s15 stmt21 'LIST TO FILE (lcFileName) NOCONSOLE' <->
-        # 28 12 <group> 39 f80300 — target as one fc-group, NOCONSOLE bound to
-        # that exact tail. Round-35 extends the arm along corpus-forced clause
-        # bytes only, each aligned statement-exact to its stored line
-        # (foxcharts s59 stmt79 <-> L3306, stmt83 <-> L3310):
-        #   1b = MEMORY, cb = STATUS, 18 <fb-string> = LIKE skeleton; both
-        # carriers end bare 39 — the same NOCONSOLE marker without the operand.
-        # Only the attested clause/tail combinations are accepted; every other
-        # spelling stays unmeasured and rejects.
+    if lead in (0x17, 0x2B):
+        # r154-displist: DISPLAY and LIST are one verb frame with two leads.
+        # Bare form oracle-measured (CMD_SWEEP.md rows DISPLAY '17', LIST
+        # '2b'); corpus VFPxWorkbookXLSX s15 stmt21
+        # 'LIST TO FILE (lcFileName) NOCONSOLE' <-> 28 12 <group> 39 f80300 —
+        # target as one fc-group, NOCONSOLE bound to that exact tail.
+        # Round-35 extends the arm along corpus-forced clause bytes only, each
+        # aligned statement-exact to its stored line (foxcharts s59 stmt79 <->
+        # L3306, stmt83 <-> L3310): 1b = MEMORY, cb = STATUS,
+        # 18 <fb-string> = LIKE skeleton; both carriers end bare 39 — the same
+        # NOCONSOLE marker without the operand. Round-154 measures the 2e =
+        # OBJECTS sub-word under both leads, the grouped fc..fd LIKE operand,
+        # and LIKE optional under MEMORY, on the oracle
+        # (round154_displist_streams.json, 42 compiled / 8 diagnostic /
+        # 0 cut_short). Only the measured clause/tail combinations are
+        # accepted; every other spelling stays unmeasured and rejects. Each
+        # lead keeps the refusal class it already had. Round-164 measures
+        # LIST MEMORY without LIKE on the oracle
+        # (round164_listmem_streams.json, 22 compiled / 5 diagnostic /
+        # 0 cut_short): the LIKE run is optional under MEMORY for the 0x2B
+        # lead too, while OBJECTS keeps the LIKE-mandatory contract there.
+        verb = "DISPLAY" if lead == 0x17 else "LIST"
+        if lead == 0x17:
+            bad = tail_bad = "statement lead 0x17 trailing bytes"
+            unsafe_bad = "statement lead 0x17 trailing bytes"
+        else:
+            bad = "statement lead 0x2b"
+            tail_bad = "statement lead 0x2b trailing bytes"
+            unsafe_bad = "statement lead 0x2b unsafe LIKE skeleton"
         if end == 1:
-            return ("LIST",)
+            return (verb,)
         clause = None
         t = 1
-        if buf[1] == 0x1B:
-            clause = "MEMORY"
+        word = _DISPLAY_LIST_WORDS.get(buf[1])
+        if word is not None:
+            clause = word
             t = 2
-        elif buf[1] == 0xCB:
-            clause = "STATUS"
-            t = 2
+        if lead == 0x17 and clause is not None and t == end:
+            # The table's old one-tuple readings (17 / 17 1b / 17 cb),
+            # plus the measured 17 2e. Bare 2b+sub-word stays refused:
+            # no oracle row carries it.
+            return (verb + " " + clause,)
         if end < t + 2 or buf[t] != S.TO_MARK or buf[t + 1] != S.COPY_FILE_MARK:
-            raise Unsupported("statement lead 0x2b")
+            raise Unsupported(bad)
         target, k = _fc_group(buf, t + 2, end, syms)
         like = None
-        if clause == "MEMORY":
-            # LIKE consumes the pattern literal; only the single-token unquoted
-            # skeleton is measured ('LIKE *'), mirroring the r29 bare-path guard.
-            if k >= end or buf[k] != 0x18:
-                raise Unsupported("statement lead 0x2b")
-            like, k = _dec_str_arg(buf, k + 1, end)
-            if like == "" or any(ch in like for ch in " \t\"'"):
-                raise Unsupported("statement lead 0x2b unsafe LIKE skeleton")
+        grouped = False
+        if clause == "OBJECTS" and lead == 0x2B \
+                and (k >= end or buf[k] != S.COPY_FIELDS_LIKE):
+            # Shipped 0x2B contract (round-35 test): OBJECTS still requires
+            # its LIKE operand under this lead. MEMORY takes the measured
+            # optional reading (r164-listmem): the oracle compiles
+            # `LIST MEMORY TO FILE (<name>) NOCONSOLE` to the same
+            # 2b 1b 28 12 <group> 39 with no 18 at all.
+            raise Unsupported(bad)
+        if k < end and buf[k] == S.COPY_FIELDS_LIKE:
+            # The 18 LIKE mark is admitted behind MEMORY and OBJECTS only;
+            # STATUS refuses it on the compiler (nc_status_like). The operand
+            # is the shipped bare fb skeleton or the grouped fc..fd form the
+            # source spells with parentheses — a group carries its own parens
+            # and does not inherit the bare-skeleton guard.
+            if clause not in ("MEMORY", "OBJECTS"):
+                raise Unsupported(tail_bad)
+            if k + 1 < end and buf[k + 1] == S.FC:
+                like, k = _fc_group(buf, k + 1, end, syms)
+                grouped = True
+            else:
+                like, k = _dec_str_arg(buf, k + 1, end)
+                if like == "" or any(ch in like for ch in " \t\"'"):
+                    raise Unsupported(unsafe_bad)
         if clause is None:
             # Round-29 exactness preserved: on the bare form NOCONSOLE is the
             # full 39 f80300 tail; a bare statement-final 39 there is unmeasured.
-            if k + 4 != end or buf[k] != 0x39 \
+            if k + 4 != end or buf[k] != S.REPORT_NOCONSOLE \
                     or buf[k + 1:k + 4] != bytes([0xF8, 0x03, 0x00]):
-                raise Unsupported("statement lead 0x2b trailing bytes")
+                raise Unsupported(tail_bad)
         else:
-            if k + 1 != end or buf[k] != 0x39:
-                raise Unsupported("statement lead 0x2b trailing bytes")
-        return ListToFileStmt(target, True, clause, like)
+            if k + 1 != end or buf[k] != S.REPORT_NOCONSOLE:
+                raise Unsupported(tail_bad)
+        return ListToFileStmt(target, True, clause, like,
+                              verb=verb, like_group=grouped)
     if lead == S.SEEK_LEAD:
         # SEEK <expr> [ORDER [<index>] [OF <cdx>] [ASCENDING|DESCENDING]]
         #             [IN <alias>] — the whole clause bank, r77-seek.
@@ -12133,11 +12650,14 @@ def _dec_statement(buf, syms):
         # ahead of the IN clause on the wire — `80 2c 36 16 <parent>
         # <name>` is BOTTOM then IN, the same bytes whether the source
         # wrote IN then BOTTOM or BOTTOM then IN.
+        # r156-hidewin: ALL is `87 2c 03` too (HIDE). The whole statement
+        # is three bytes with nothing behind the 03; anything longer
+        # still falls through to the name slot below and keeps its refusal.
         verb = "SHOW" if lead == 0x80 else "HIDE"
         if end < 3 or buf[1] != 0x2C:
             raise Unsupported("statement lead 0x%02x" % lead)
-        if lead == 0x80 and end == 3 and buf[2] == 0x03:
-            return ShowWindowStmt("ALL", None, verb="SHOW", modifier="")
+        if end == 3 and buf[2] == 0x03:
+            return ShowWindowStmt("ALL", None, verb=verb, modifier="")
         t = 2
         modifier = ""
         if lead == 0x80 and t < end and buf[t] in S.SHOW_WINDOW_MODIFIERS:
@@ -12326,13 +12846,27 @@ def _dec_statement(buf, syms):
             return ("PUSH KEY CLEAR",)
         # r42-zapin: PUSH/POP MENU <sysmenu> = 8a/8b 1c ec <id>.
         # _MSYSMENU is id 0x02; _MFILE is 0x23. Other ids stay Unsupported.
-        if end == 4 and buf[1] == S.ON_SELECTION_MENU \
-                and buf[2] == S.MENU_BAR_ID_MARK:
-            name = S.PUSH_POP_MENU_IDS.get(buf[3])
+        # r177-tomaster: POP MENU <sysmenu> TO MASTER = 8b 1c 28 bc ec <id>.
+        # The universal TO mark with the MASTER word behind it — the same
+        # literal pair RETURN writes for 'RETURN TO MASTER' — spliced between
+        # the MENU keyword and the id, the source's clause-last order stored
+        # clause-first. POP-side only: VFP9 emits nothing for a PUSH-side TO
+        # MASTER, so a 28 under lead 8a is unmeasured. bc is the only word
+        # the compiler takes behind this 28.
+        j = 2
+        to_master = ""
+        if lead == S.POP_KEY_LEAD and end == 6 \
+                and buf[1] == S.ON_SELECTION_MENU \
+                and buf[2] == S.TO_MARK and buf[3] == S.RETURN_TO_MASTER_WORD:
+            j, to_master = 4, " TO MASTER"
+        if end == j + 2 and buf[1] == S.ON_SELECTION_MENU \
+                and buf[j] == S.MENU_BAR_ID_MARK:
+            name = S.PUSH_POP_MENU_IDS.get(buf[j + 1])
             if name is None:
-                raise Unsupported("PUSH/POP MENU id 0x%02x unmeasured" % buf[3])
+                raise Unsupported("PUSH/POP MENU id 0x%02x unmeasured"
+                                  % buf[j + 1])
             verb = "PUSH" if lead == S.PUSH_KEY_LEAD else "POP"
-            return ("%s MENU %s" % (verb, name),)
+            return ("%s MENU %s%s" % (verb, name, to_master),)
         if end != 2 or buf[1] != 0x17:
             raise Unsupported("PUSH/POP KEY trailing bytes")
         return ("PUSH KEY",) if lead == S.PUSH_KEY_LEAD else ("POP KEY",)
@@ -13396,6 +13930,85 @@ def _dec_statement(buf, syms):
                  and _written_first(while_tap, for_tap))
         return RecallScopeStmt(scope or "", count, cond=cond, alias=alias,
                                while_cond=while_cond, while_first=first)
+    if lead == S.BLANK_LEAD:
+        # r184-blank: the xbase record-scope bank behind bare `93`
+        # (oracle round184_blank matrix, 50 compile, 9 diagnostic; the
+        # r93-recall walk plus the FIELDS list BLANK adds). The wire order
+        # under the lead is
+        #   93 [16 <alias>] [11 <f7 list joined by 07>] [30] [<scope>]
+        #   [13 fc <for> (fd)] [2b fc <while>]
+        # and the source spells it the other way round:
+        #   BLANK [FIELDS <list>] [<scope>] [FOR <c>] [WHILE <c>]
+        #   [IN <alias>] [NOOPTIMIZE]
+        # NEXT and RECORD carry their count in an fc-group; ALL and REST
+        # are bare. A condition unit followed by another closes with fd;
+        # a final unit runs to stream end.
+        if end == 1:
+            return ("BLANK",)
+        t = 1
+        alias = None
+        if t < end and buf[t] == S.GO_IN_CLAUSE:
+            alias, t = _dec_in_alias(
+                buf, t + 1, end, syms,
+                refusal="statement lead 0x93 trailing bytes")
+        fields = None
+        if t < end and buf[t] == S.FIELDS_MARK:
+            # The plain 07-joined f7 list ONLY. BLANK has no FIELDS LIKE /
+            # EXCEPT, so _sg_fields' qualifier bank is deliberately not
+            # reached.
+            fields, t = _sg_sym_list(buf, t + 1, end, syms,
+                                     "statement lead 0x93 trailing bytes")
+        nooptimize = False
+        if t < end and buf[t] == S.DELETE_NOOPTIMIZE:
+            nooptimize = True
+            t += 1
+        scope, count = None, None
+        if t < end and buf[t] in S.DELETE_SCOPE_WORDS:
+            scope = S.DELETE_SCOPE_WORDS[buf[t]]
+            t += 1
+            if scope in S.DELETE_SCOPE_COUNTED:
+                try:
+                    count, t = _fc_group(buf, t, end, syms)
+                except Unsupported:
+                    raise Unsupported("BLANK %s count unresolved" % scope)
+        # Tapped like RECALL's FOR/WHILE pair (r93-recall): the compiler
+        # normalises WHILE-first sources to FOR-first on the wire while the
+        # symbol table numbers by source order, so the taps recover which
+        # clause was written first. The fd rules are _fc_group's verbatim.
+        cond = while_cond = None
+        for_tap = while_tap = None
+        if t + 2 < end and buf[t] == S.FOR_MARK and buf[t + 1] == S.FC:
+            with _sym_tap() as for_tap:
+                es, k = _dec_expr(buf, t + 2, end, syms,
+                                  stop_bytes=_IF_COND_STOP)
+            if len(es) != 1:
+                raise Unsupported("BLANK FOR condition unresolved")
+            if k < end and buf[k] == S.FD:
+                k += 1
+            elif k != end:
+                raise Unsupported("BLANK FOR condition unresolved")
+            cond, t = es[0], k
+        if t + 2 < end and buf[t] == S.DELETE_WHILE_MARK \
+                and buf[t + 1] == S.FC:
+            with _sym_tap() as while_tap:
+                ws, k = _dec_expr(buf, t + 2, end, syms,
+                                  stop_bytes=_IF_COND_STOP)
+            if len(ws) != 1 or k != end:
+                raise Unsupported("BLANK WHILE condition unresolved")
+            while_cond, t = ws[0], k
+        if t != end:
+            raise Unsupported("statement lead 0x93 trailing bytes")
+        # WHILE-first emission is proven only with no other clause (the
+        # matrix's WHILE-before-FOR row); with scope, IN, FIELDS or
+        # NOOPTIMIZE present the canonical order is emitted and a
+        # renumbering shape would fail frame-equal loudly rather than lift
+        # silently wrong.
+        first = (while_tap is not None and scope is None and alias is None
+                 and fields is None and not nooptimize
+                 and _written_first(while_tap, for_tap))
+        return BlankScopeStmt(scope or "", count, fields=fields, cond=cond,
+                              alias=alias, while_cond=while_cond,
+                              nooptimize=nooptimize, while_first=first)
     if lead == S.INSERT_BLANK_LEAD:
         # r47-insertforms: INSERT BLANK is `28 08`; INSERT BEFORE BLANK
         # appends the BEFORE byte. The lead doubles as the TO mark elsewhere,
@@ -13405,15 +14018,27 @@ def _dec_statement(buf, syms):
         # `08` rides in front of BEFORE's `be` whichever order the source
         # spells them. 88 authored spellings were compiled against this lead
         # and no other one produces a frame, so anything else stays refused.
+        # r203-insafter: none of those spellings was AFTER. The position slot
+        # behind BLANK's `08` is two-valued — BEFORE's `be` or AFTER's `2d`,
+        # the same pair DEFINE PAD and DEFINE BAR spend — so the bank is six
+        # frames: `28 2d` is INSERT AFTER and `28 08 2d` INSERT BLANK AFTER,
+        # whichever order the source spells BLANK and AFTER. BEFORE and AFTER
+        # together, a doubled word or an operand behind AFTER are compiler
+        # diagnostics, so no other tail has a source.
         if end == 1:
             return ("INSERT",)
         if end == 2 and buf[1] == S.INSERT_BEFORE_MARK:
             return ("INSERT BEFORE",)
+        if end == 2 and buf[1] == S.INSERT_AFTER_MARK:
+            return ("INSERT AFTER",)
         if end == 2 and buf[1] == S.INSERT_BLANK_MARK:
             return ("INSERT BLANK",)
         if end == 3 and buf[1] == S.INSERT_BLANK_MARK \
                 and buf[2] == S.INSERT_BEFORE_MARK:
             return ("INSERT BEFORE BLANK",)
+        if end == 3 and buf[1] == S.INSERT_BLANK_MARK \
+                and buf[2] == S.INSERT_AFTER_MARK:
+            return ("INSERT AFTER BLANK",)
         raise Unsupported("statement lead 0x28")
     if lead == S.SUSPEND_LEAD and end == 1:
         return ("SUSPEND",)      # r47-suspend; RESUME is 41 and CANCEL is 0b
@@ -13476,8 +14101,19 @@ def _dec_statement(buf, syms):
             if j >= end or buf[j] != S.APPEND_FROM_MARK:
                 raise Unsupported("APPEND MEMO FROM missing")
             j += 1
-            if j < end and buf[j] in (S.STR, S.STR2):
-                fname, j = _dec_str_arg(buf, j, end)
+            bare_name = False
+            if j < end and buf[j] == S.STR:
+                # r180-appendmemo: ungrouped fb behind the FROM mark is the
+                # bare, unquoted filename; every quoted spelling groups
+                # behind fc, and re-quoting this one would recompile to the
+                # grouped frame.
+                nm, j = _dec_str_arg(buf, j, end)
+                fname, bare_name = Str(nm), True
+            elif j < end and buf[j] == S.STR2:
+                # no source spelling reaches an ungrouped d9 here (double
+                # quotes always group); it stays refused rather than
+                # inherit bare_name.
+                raise Unsupported("APPEND MEMO ungrouped d9")
             else:
                 try:
                     fname, j = _fc_group(buf, j, end, syms)
@@ -13489,7 +14125,7 @@ def _dec_statement(buf, syms):
                 j += 1
             if j != end:
                 raise Unsupported("APPEND MEMO trailing bytes")
-            return AppendMemoStmt(fld, fname, overwrite)
+            return AppendMemoStmt(fld, fname, overwrite, bare_name=bare_name)
         if end >= 3 and buf[1] == S.APPEND_FROM_MARK:
             # ORACLE round-25 BOUND (c4/c5) + corpus alignment
             # xfrxlib.vcx::cboHierarchy s1 stmts[18]/[23]:
@@ -13793,6 +14429,10 @@ def _dec_statement(buf, syms):
             raise Unsupported("WAIT WINDOW unwrapped")
         else:
             j = 2
+        # r171-waitmsg: where the modifier bank opened. A message-less
+        # WINDOW frame ends wherever its bank ends; an empty bank keeps
+        # refusing below (the r115 `52 2c` pin).
+        bank = j
         at_clause = None
         noclear = nowait = False
         timeout = None
@@ -13830,7 +14470,21 @@ def _dec_statement(buf, syms):
                     raise Unsupported("WAIT TIMEOUT unwrapped")
                 ts, tk = _dec_expr(buf, j + 1, end, syms,
                                    stop_bytes=frozenset({S.FD}))
-                if len(ts) != 1 or tk >= end or buf[tk] != S.FD:
+                if len(ts) != 1:
+                    raise Unsupported("WAIT TIMEOUT unresolved")
+                if tk == end:
+                    # r158-waittimeout: statement-final timeout group.
+                    # The reader already took the closer (container
+                    # strips END_STMT and one trailing fd), so a timeout
+                    # group whose expression ends at end-of-statement is
+                    # a CLOSED group with no message behind it — the
+                    # clause-position reading the bare arm already makes
+                    # above. A group stopping on a non-fd byte mid-stream
+                    # stays refused below.
+                    return WaitStmt(None, at=at_clause, timeout=ts[0],
+                                    noclear=noclear, nowait=nowait,
+                                    to_var=to_var)
+                if tk > end or buf[tk] != S.FD:
                     raise Unsupported("WAIT TIMEOUT unresolved")
                 timeout = ts[0]
                 j = tk + 1
@@ -13838,10 +14492,12 @@ def _dec_statement(buf, syms):
                 raise Unsupported(
                     "WAIT modifier 0x%02X unmeasured" % op)
         if j >= end:
-            # Only the measured TO shape may end at the 2c marker with no
-            # message group (`WAIT WINDOW TO v`); a bare WINDOW frame with
-            # no message stays rejected.
-            if to_var is None:
+            # Only a frame that measured something past the 2c marker may
+            # end with no message group: the TO shape (`WAIT WINDOW TO v`)
+            # or a WINDOW frame with a non-empty modifier bank (`WAIT
+            # WINDOW NOWAIT`); a bare WINDOW frame with an empty bank
+            # stays rejected.
+            if to_var is None and j == bank:
                 raise Unsupported("WAIT message missing")
             return WaitStmt(None, at=at_clause, timeout=timeout,
                             noclear=noclear, nowait=nowait, to_var=to_var)
@@ -14062,7 +14718,7 @@ def _dec_statement(buf, syms):
                     # its own.
                     seg += _sql_stmt_distinct_word(syms) + " "
                 if arm_cols:
-                    parts = [_emit(e) + (" AS %s" % a if a else "")
+                    parts = [_emit_select_col(e) + (" AS %s" % a if a else "")
                              for e, a in arm_cols]
                     if arm_star_leading:
                         parts.insert(0, arm_star)
@@ -14519,7 +15175,7 @@ def _dec_statement(buf, syms):
             k += 1
         if no_cursor and k >= end:
             tbl_txt = tbl if isinstance(tbl, str) else str(tbl)
-            col_txt = ", ".join(_emit(e) for e in es)
+            col_txt = ", ".join(_emit_select_col(e) for e in es)
             return SqlSelectColumns("SELECT %s FROM %s" % (col_txt, tbl_txt),
                                     readwrite=False)
         if buf[k:k+2] != bytes(S.SQLSEL_INTOCURSOR_MARK):
@@ -15483,6 +16139,18 @@ def _dec_statement(buf, syms):
             with to_tap:
                 while True:
                     tv, t = _dec_lvalue(buf, t, end, syms)
+                    # r147-countto: an array element under a root arrives
+                    # from the lvalue reader as a RECEIVER with its
+                    # subscript group unread, the way the 0x54 and 0x4a
+                    # arms already take it (r78-storetarget). The run in
+                    # the 28 slot is that same run, so the group is read
+                    # here by the same helper. The opcode at t-3 is what
+                    # says the group is subscripts: behind f6/e5 it is;
+                    # behind f7 the run has already ended and SUM's own
+                    # expression group opens here instead.
+                    if (t < end and buf[t] == S.FC and t >= 3
+                            and buf[t - 3] in (S.NAME, S.ARRAY_ELEM_CALL)):
+                        tv, t = _dec_indexed_target(tv, buf, t, end, syms)
                     targets.append(tv)
                     # a COUNT stream ends directly after its target memvar
                     if t < end and buf[t] == S.ARGJOIN:
@@ -15642,6 +16310,19 @@ def _dec_statement(buf, syms):
         raise Unsupported("ELSE frame shape")
     if lead in (S.EXPRSTMT, S.EXPRSTMT_BARE):
         bare = lead == S.EXPRSTMT_BARE
+        if end == 1:
+            # r181-dotstmt: the empty WITH-scope member run. A source line
+            # whose whole content is the scope dot compiles to the lone
+            # byte 99 — no fc group, no e2, no path link, no symbol. The
+            # arm's first act used to be an unconditional buf[1] read, so
+            # the shortest frame of all raised an IndexError-shaped
+            # "malformed statement" instead of lifting (the r49-valsweep
+            # one-byte precedent, same failure mode). Per-lead on purpose:
+            # `=` with nothing behind it is a compiler diagnostic, so a
+            # one-byte 86 has no producer and keeps its historical refusal.
+            if not bare:
+                raise Unsupported("expression-statement unwrap")
+            return (".",)
         if buf[j] != S.FC:
             if not bare:
                 raise Unsupported("expression-statement unwrap")
@@ -16084,6 +16765,31 @@ def _dec_statement(buf, syms):
         # (/tmp/foxlift-r34-census scripts/lane_sims34.py sim_B_rename) is the
         # whole acceptance boundary, and the whole-population diff proved it
         # touches exactly the two gain keys.
+        # r185-renameclass: byte 1 names the subcommand under this lead the
+        # same way it does under 96 / 97 — 4f is CLASS (S.ADD_CLASS_MARK).
+        # Behind it the statement is 4f <class name> [c3 <library>] 28 <new
+        # name>: the class name takes MODIFY CLASS's four shapes
+        # (_dec_class_name), the c3 library and the 28 new name the
+        # format's file-name pair (_dec_index_name). c3 is optional and the
+        # compiler stores OF … TO … whatever order the source wrote, so the
+        # reader takes the marks in the order they stand and the emitter
+        # writes that one order back; OVERWRITE leaves no trace. 28 is
+        # required — a 4f statement without it, and the bare two-byte
+        # `3d 4f`, stay loudly Unsupported, as do 31 / c4 / d1.
+        if end >= 2 and buf[1] == S.ADD_CLASS_MARK:
+            name, t = _dec_class_name(buf, 2, end, syms)
+            if name is None:
+                raise Unsupported("RENAME CLASS name missing")
+            library = None
+            if t < end and buf[t] == S.MODIFY_OF_MARK:
+                library, t = _dec_index_name(buf, t + 1, end, syms,
+                                             "RENAME CLASS OF")
+            if t >= end or buf[t] != S.TO_MARK:
+                raise Unsupported("statement lead 0x3d missing TO")
+            new, t = _dec_index_name(buf, t + 1, end, syms, "RENAME CLASS TO")
+            if t != end:
+                raise Unsupported("RENAME CLASS trailing bytes")
+            return RenameClassStmt(name, library, new)
         if j + 3 > end or buf[j] not in (S.STR, S.STR2):
             raise Unsupported("RENAME old-name literal missing")
         n_old = S.u16(buf, j + 1)
@@ -16136,15 +16842,33 @@ def _dec_statement(buf, syms):
         t = 2
         head = {S.ON_SELECTOR_ERROR: "ERROR",
                 S.ON_SELECTOR_ESCAPE: "ESCAPE",
+                S.ON_SELECTOR_READERROR: "READERROR",  # r160-onreaderror
                 S.ON_SELECTOR_SHUTDOWN: "SHUTDOWN"}.get(sel)
         if head is not None:
             handler, t = _on_handler_text(buf, t, end)
             return OnStmt(head, handler)
         if sel == S.ON_SELECTOR_KEY_LABEL:
             # 31 17 32 fb<label> fb<handler>
+            # 31 17 32 fc<literal>fd fb<handler> (r152-onkeylabel)
             if t >= end or buf[t] != S.ON_KEY_LABEL_MARK:
                 raise Unsupported("ON KEY LABEL form")
             t += 1
+            if t < end and buf[t] == S.FC:
+                # A QUOTED label literal is an expression, so the compiler
+                # groups it; a bare key-label token stays a plain fb string
+                # on the shipped path below. The inner mark carries the
+                # quote style the source wrote (fb single, d9 double) and
+                # _emit keeps it, so the re-emitted source recompiles to
+                # the same bytes. A non-literal group (explicit parens with
+                # the 03 postfix, a memvar reference, a compound Bin)
+                # compiles into this slot but no section holds one, so it
+                # stays a loud refusal of its own.
+                node, t = _fc_group(buf, t, end, syms)
+                if not isinstance(node, Str):
+                    raise Unsupported("ON KEY LABEL grouped label unmeasured")
+                label = _emit(node)
+                handler, t = _on_handler_text(buf, t, end)
+                return OnStmt("KEY LABEL", handler, label=label)
             if t + 3 > end or buf[t] != S.STR:
                 raise Unsupported("ON KEY LABEL label missing")
             ln = S.u16(buf, t + 1)
@@ -16226,24 +16950,40 @@ def _dec_statement(buf, syms):
             # ON PAD x OF _MSYSMENU ACTIVATE POPUP p. Byte bc is the PAD
             # selector here and the ACTIVATE mark after OF — position decides.
             # DO <cmd> is an fb payload after OF (same as ON BAR).
-            if t + 3 > end or buf[t] != S.SYM:
+            # r172-onpadname: each of the three name slots reads the bank
+            # the menu clauses already share — a bare f7 symbol, a system
+            # constant, or the source's own parenthesised group. The PAD
+            # slot's ec id is a MENU_BAR_IDS bar id (flat single-byte bank,
+            # round-155 discipline: no wide escape, no quoted literal); the
+            # OF and ACTIVATE slots read the shared popup operand, whose
+            # PUSH_POP names keep their readings under the wider table.
+            if t + 3 <= end and buf[t] == S.SYM:
+                pad = _sym(syms, S.u16(buf, t + 1))
+                t += 3
+            elif t + 2 <= end and buf[t] == S.MENU_BAR_ID_MARK \
+                    and buf[t + 1] in S.MENU_BAR_IDS:
+                pad = S.MENU_BAR_IDS[buf[t + 1]]
+                t += 2
+            elif t < end and buf[t] == S.FC:
+                node, k = _fc_group(buf, t, end, syms)
+                if not isinstance(node, Paren):
+                    raise Unsupported("ON PAD name missing")
+                pad, t = _emit(node), k
+            else:
                 raise Unsupported("ON PAD name missing")
-            pad = _sym(syms, S.u16(buf, t + 1))
-            t += 3
             if t >= end or buf[t] != S.ON_SELECTION_OF:
                 raise Unsupported("ON PAD OF clause missing")
             t += 1
-            if t + 2 > end or buf[t] != S.MENU_BAR_ID_MARK:
-                raise Unsupported("ON PAD OF form")
-            of_menu = S.PUSH_POP_MENU_IDS.get(buf[t + 1])
+            of_menu, t = _menu_popup_operand(buf, t, end, syms)
             if of_menu is None:
-                raise Unsupported("ON PAD menu id 0x%02x unmeasured" % buf[t + 1])
-            t += 2
+                raise Unsupported("ON PAD OF form")
             if t < end and buf[t] == S.ON_ACTIVATE_MARK:
-                if t + 5 != end or buf[t + 1] != S.DEFINE_POPUP_KW \
-                        or buf[t + 2] != S.SYM:
+                if t + 2 > end or buf[t + 1] != S.DEFINE_POPUP_KW:
                     raise Unsupported("ON PAD ACTIVATE target form")
-                handler = "ACTIVATE POPUP " + _sym(syms, S.u16(buf, t + 3))
+                target, t = _menu_popup_operand(buf, t + 2, end, syms)
+                if target is None or t != end:
+                    raise Unsupported("ON PAD ACTIVATE target form")
+                handler = "ACTIVATE POPUP " + target
                 return OnStmt("PAD", handler, popup=pad, of_menu=of_menu)
             handler, t = _on_handler_text(buf, t, end)
             return OnStmt("PAD", handler, popup=pad, of_menu=of_menu)
@@ -17535,7 +18275,27 @@ def _dec_statement(buf, syms):
             prompt = " " + txt
         if t >= end or buf[t] != S.TO_MARK:
             raise Unsupported("GETEXPR TO clause missing")
-        target, t = _r50_operand(buf, t + 1, end, syms, "GETEXPR TO")
+        if t + 1 < end and buf[t + 1] == S.MEMBER:
+            # r151-getexpr: the TO target is the one operand slot the
+            # compiler writes bare — a dotted reference rides `f4 <u16>`
+            # hops plus a terminal `f7 <u16>` with no fc wrapper, no 03
+            # postfix and no closer. The run is bounded here rather than
+            # handed to _dec_expr because _IF_COND_STOP is {fd} only,
+            # while the d4 TYPE and 0e DEFAULT marks sit directly behind
+            # the terminal f7. The terminal token is the whole
+            # discriminator: a run ending on anything but f7 keeps the
+            # same refusal it kept before this law.
+            names, j = [], t + 1
+            while j + 3 <= end and buf[j] == S.MEMBER:
+                names.append(_sym(syms, S.u16(buf, j + 1)))
+                j += 3
+            if j + 3 <= end and buf[j] == S.SYM:
+                names.append(_sym(syms, S.u16(buf, j + 1)))
+                target, t = _emit(MemberPath(names)), j + 3
+            else:
+                raise Unsupported("GETEXPR TO operand unresolved")
+        else:
+            target, t = _r50_operand(buf, t + 1, end, syms, "GETEXPR TO")
         tail = ""
         for mark, kw in ((S.GETEXPR_TYPE_MARK, "TYPE"),
                          (S.GETEXPR_DEFAULT_MARK, "DEFAULT")):
@@ -17588,6 +18348,35 @@ def _dec_statement(buf, syms):
         if scope:
             text += " ALL"
         return CommandLine(text)
+    if lead == S.FLUSH_LEAD:
+        # r183-flush: `FLUSH [<name expression>] [FORCE]`, the bank measured
+        # whole. The bare frame and the `ca` FORCE byte stand where the
+        # one-byte bank left them. The operand rides the statement's own
+        # `fc..fd` group — the same group `_r50_operand` reads for every name
+        # operand in this format — whose closer is reader-stripped when the
+        # group ends the statement. The `03` inside the group is the
+        # runtime-paren postfix the expression reader consumes, one per source
+        # parenthesis, NOT the universal 03 ALL scope byte: on this lead
+        # `FLUSH ALL` lexes ALL as a file name and no 03 ever stands alone
+        # behind 5b. Only the group is admitted. The raw-name operand
+        # (`fb <text>`, what a bare identifier, a bare number, a bare logical
+        # or a purely numeric parenthesis compiles to), the `16` IN work area
+        # and any `ca` standing behind an operand are measured but have no
+        # producer in the corpus, so they stay refused.
+        if end == 1:
+            return ("FLUSH",)
+        if end == 2 and buf[1] == S.FLUSH_FORCE_MARK:
+            return ("FLUSH FORCE",)
+        if buf[1] != S.FC:
+            raise Unsupported("statement lead 0x5b trailing bytes")
+        es, k = _dec_expr(buf, 2, end, syms, stop_bytes=_IF_COND_STOP)
+        if len(es) != 1:
+            raise Unsupported("FLUSH operand unresolved")
+        if k < end and buf[k] == S.FD:
+            k += 1  # closer reader-stripped when statement-final
+        if k != end:
+            raise Unsupported("statement lead 0x5b trailing bytes")
+        return CommandLine("FLUSH " + _emit(es[0]))
     if lead in _R50_BARE_COMMANDS:
         word, mods = _R50_BARE_COMMANDS[lead]
         if end == 1:
@@ -17624,6 +18413,16 @@ def _dec_statement(buf, syms):
                 if t == end:
                     return ImplementsStmt(iface, '"%s"' % lib)
         raise Unsupported("statement lead 0xb9")
+    if lead == S.STRAY_ENDIF_LEAD and end == 1:
+        # r203-b8err: an ENDIF (or its four-letter ENDI) with no IF open is a
+        # compiler diagnostic — "An IF | ELSE | ENDIF statement is missing" —
+        # and VFP9 still writes the module, the stray closer as this bare
+        # byte where a matched ENDIF is 1e. Measured in a main program, a
+        # PROCEDURE, a class method, after a closed IF, in a CASE branch and
+        # in the menu-program carrier's own slot behind a macro DO; the other
+        # stray closers keep their own leads. The emitted ENDIF recompiles to
+        # the same byte beside the same diagnostic, the way a b4 line does.
+        return StrayEndifStmt()
     raise Unsupported(f"statement lead 0x{lead:02x}")
 
 
@@ -18380,8 +19179,8 @@ def _walk_block(stmts, i, stop, syms, stops=frozenset(), code_base=None,
                 i = end_at + 1
                 continue
             collected = []                      # (clause, stmt) in order
-            otherwise_body = None
-            oth_off = None                      # OTHERWISE mark, when one follows
+            otherwise_bodies = []               # one per OTHERWISE mark, in order
+            oth_off = None                      # FIRST OTHERWISE mark, when one follows
             pos = i + 1
             # r89-docase: the opener's t_first skips the stray run the
             # oracle keeps in-frame ahead of the first CASE — a workarea
@@ -18412,17 +19211,26 @@ def _walk_block(stmts, i, stop, syms, stops=frozenset(), code_base=None,
                 if s2.text is None and s2.stream[0] == S.ENDCASE_LEAD:
                     break
                 if s2.text is None and s2.stream[0] == S.OTHERWISE_LEAD:
-                    oth_off = s2.offset - code_base
+                    # MEASURED (r178-othchain): an OTHERWISE mark obeys the
+                    # same next-clause-mark rule a CASE mark obeys — its word
+                    # is the distance to the NEXT mark of this frame, the
+                    # next OTHERWISE when the source wrote a run of them and
+                    # the ENDCASE for the last one. With a single OTHERWISE
+                    # the next mark IS the ENDCASE, which is the shipped n=1
+                    # reading. Walk the chain; do not break.
+                    if oth_off is None:
+                        oth_off = s2.offset - code_base  # the FIRST of the run
                     oth = dec_statement(s2.stream, syms)
-                    otherwise_body, pos = _walk_block(
+                    oth_body, pos = _walk_block(
                         stmts, pos + 1, stop, syms,
                         stops={S.ENDCASE_LEAD}, code_base=code_base,
                         stop_rel=oth.rel_target)
                     want_oth = stmts[pos].offset - code_base
                     if oth.rel_target != want_oth:
                         raise Unsupported(f"otherwise jump target {oth.rel_target} "
-                                          f"!= ENDCASE distance {want_oth}")
-                    break
+                                          f"!= next-clause distance {want_oth}")
+                    otherwise_bodies.append(oth_body)
+                    continue
                 if s2.text is not None:
                     # MEASURED (r54-macrocase, 20/20): a CASE whose condition
                     # holds a macro is never compiled — the line is stored
@@ -18440,6 +19248,14 @@ def _walk_block(stmts, i, stop, syms, stops=frozenset(), code_base=None,
                     raise Unsupported("unexpected statement inside DO CASE")
                 else:
                     clause = dec_statement(s2.stream, syms)
+                if oth_off is not None:
+                    # MEASURED (r178-othchain q_case_after_oth): a CASE mark
+                    # BEHIND an OTHERWISE mark compiles, and the OTHERWISE
+                    # word names it — the rule is the next mark of ANY kind.
+                    # No corpus frame holds one, and the frame's source order
+                    # would no longer be clauses-then-OTHERWISE-run.
+                    # Unadopted: stays loud.
+                    raise Unsupported("CASE clause after OTHERWISE")
                 # MEASURED: a clause's false-jump lands on its NEXT clause mark.
                 # Verify the PREVIOUS clause now that its successor is known.
                 if collected:
@@ -18485,8 +19301,7 @@ def _walk_block(stmts, i, stop, syms, stops=frozenset(), code_base=None,
                                   f"distance {want_end}")
             ast.clauses = collected
             ast.strays = [st for st, _sst in strays]
-            if otherwise_body is not None:
-                ast.otherwise_body = otherwise_body
+            ast.otherwise_bodies = otherwise_bodies
             out.extend(_emit_line(ast).split("\n"))
             i = pos + 1
             continue
@@ -18570,12 +19385,19 @@ def _emit_vfp_string(text, dq):
             return "\"'\""
         return "[']"
     # VFP has no escape inside a literal: the delimiter must be a character
-    # the payload does not contain. Prefer the one the wire recorded, then the
-    # other quote, then brackets.
+    # the payload does not contain. Prefer the one the wire recorded, then
+    # the other quote, then brackets.
     if dq and '"' not in text:
         return '"' + text + '"'
     if not dq and "'" not in text:
         return "'" + text + "'"
+    if not dq and "[" not in text and "]" not in text:
+        # r205-strlead: a single-quoted-wire literal containing an
+        # apostrophe cannot spell '...' and must not fall through to "..."
+        # (d9, wrong lead) — brackets wire fb whatever the payload, so the
+        # FrmArticulo carrier literals recompile to fb. Gated on not-dq:
+        # the dq-True fallthrough keeps round 47's pinned spelling.
+        return "[" + text + "]"
     if '"' not in text:
         return '"' + text + '"'
     if "'" not in text:
@@ -18624,8 +19446,13 @@ def _emit(node):
         #                   that makes '007' ride 3 — the band the strict
         #                   equality would otherwise block, breaking coverage
         #                   neutrality);
+        #   zero-padded decimal for negative values whose width exceeds
+        #                   their plain length (r153-negpad: the digits byte
+        #                   counts the characters written plus one slot for
+        #                   the minus, so '-03' rides 3); the b0008 pin owns
+        #                   -26 at every width and stays ahead of it;
         #   anything else raises Unsupported — never normalize silently, never
-        #   guess the unmeasured 5..7-padded-hex band or other negative widths.
+        #   guess the unmeasured 5..7-padded-hex band.
         w = node.width
         if w is None:
             return node.spelling
@@ -18651,6 +19478,18 @@ def _emit(node):
                 return "%0*d" % (w, v)
         elif v == -26 and w == 6:
             return "-0x%04x" % abs(v)
+        elif v < 0 and v != -26 and w > dec:
+            # r153-negpad: a minus buys one digit slot — the width byte
+            # counts the digits written plus the sign, measured continuous
+            # on widths 03..0d, so a padded negative rides its own
+            # character count exactly as '007' rides 03. "%0*d" puts the
+            # sign inside the field: (3, -3) -> '-03'. The padded-hex
+            # authorship lands on the same frames and is one character
+            # longer, so the ladder's spelling wins the tie. -26 is
+            # carved out entirely: b0008 pins its width-6 spelling to hex,
+            # and round38 pins its widths 5 and 7 refused, so the pin owns
+            # every width of that one value and the ladder never reaches it.
+            return "%0*d" % (w, v)
         raise Unsupported(
             "f8/f9 literal width byte %d fits no measured spelling for "
             "value %s" % (w, node.spelling))
@@ -18909,6 +19748,18 @@ def _emit(node):
     raise Unsupported(f"emitter node {type(node).__name__}")
 
 
+def _emit_select_col(e):
+    """One SELECT-list column. A negated column spells `!`: the word NOT in
+    field position makes the compiler intern a dead NOT symbol (r205-row2
+    bank: `SELECT NOT x` wires the same frame as `SELECT !x` plus the
+    symbol), while the bang recompiles to the stored frame and table.
+    Everywhere else NOT keeps its word spelling.
+    """
+    if isinstance(e, Not):
+        return "!" + _side(e.x, 3)
+    return _emit(e)
+
+
 def _forces_paren(node, min_prec):
     """True when `_side` would ADD parentheses this slot's precedence demands.
 
@@ -18964,16 +19815,19 @@ def _fmt_param(n):
     return n
 
 
-def _dim_declarator(name, dims, bracket):
+def _dim_declarator(name, dims, bracket, as_type=None):
     """One DIMENSION declarator in the SOURCE's own subscript spelling.
 
     The dimension list's closing byte carries the spelling the author wrote —
     03 for '( … )', 16 for '[ … ]' — and the two are not interchangeable on the
     wire, so re-emitting it verbatim is what keeps a recompile byte-equal. Same
     provenance and same rule as ArrayRef, IndexedElemRef and the LOCAL
-    dimension tail."""
+    dimension tail. The AS clause rides after the closer, per declarator."""
     o, c = ("[", "]") if bracket else ("(", ")")
-    return "%s%s%s%s" % (name, o, ", ".join(_emit(d) for d in dims), c)
+    txt = "%s%s%s%s" % (name, o, ", ".join(_emit(d) for d in dims), c)
+    if as_type is not None:
+        txt += " AS " + as_type
+    return txt
 
 
 def _emit_line(ast):
@@ -19060,6 +19914,13 @@ def _emit_line(ast):
             if ast.frm:
                 txt += " FROM " + ", ".join(_emit(e) for e in ast.frm)
             return txt
+        if ast.kind == "MENU":
+            # flags already carry the measured wire order, so the clause run
+            # renders as parsed (r186-definemenu: q_order1 == q_order2)
+            txt = "DEFINE MENU %s" % ast.name
+            if ast.flags:
+                txt += " " + " ".join(ast.flags)
+            return txt
         if ast.kind == "PAD":
             txt = "DEFINE PAD %s OF %s" % (ast.name, ast.of_popup)
             if ast.prompt is not None:
@@ -19068,6 +19929,8 @@ def _emit_line(ast):
                 txt += " AT %s, %s" % (_emit(ast.at[0]), _emit(ast.at[1]))
             if ast.before_name:
                 txt += " BEFORE " + ast.before_name
+            if ast.after_name:
+                txt += " AFTER " + ast.after_name
             if ast.font:
                 txt += " FONT " + ", ".join(_emit(e) for e in ast.font)
             if ast.style is not None:
@@ -19150,8 +20013,8 @@ def _emit_line(ast):
         # r53-browsehead: a clause list needs no head, so the head-less form is
         # only "BROWSE" when there is no clause at all — returning it early on
         # an empty FIELDS list would drop a TITLE or a TIMEOUT standing alone.
-        txt = ("BROWSE" if ast.window is None
-               else "BROWSE WINDOW %s" % ast.window)
+        txt = (ast.verb if ast.window is None
+               else "%s WINDOW %s" % (ast.verb, ast.window))
         if ast.fields:
             cols = []
             for fname, width, pic, heading, order in ast.fields:
@@ -19222,6 +20085,11 @@ def _emit_line(ast):
         new = ast.new_name if isinstance(ast.new_name, str) \
             else _emit(ast.new_name)
         return "RENAME %s TO %s" % (ast.old_name, new)
+    if isinstance(ast, RenameClassStmt):
+        out = "RENAME CLASS %s" % ast.name
+        if ast.library is not None:
+            out += " OF " + ast.library
+        return out + " TO " + ast.new
     if isinstance(ast, DeleteFor):
         head = "DELETE ALL FOR" if ast.all_scope else "DELETE FOR"
         return "%s %s" % (head, _emit(ast.cond))
@@ -19273,15 +20141,41 @@ def _emit_line(ast):
         if ast.alias is not None:
             out += " IN " + ast.alias
         return out
+    if isinstance(ast, BlankScopeStmt):
+        # r184-blank: the record-scoped bank in SOURCE order. Stored
+        # sources spell the field list, then the scope word, then the
+        # conditions, then the work area and NOOPTIMIZE, even though the
+        # wire is IN-clause-first; mirror that order like DeleteScopeStmt
+        # does.
+        out = "BLANK"
+        if ast.fields:
+            out += " FIELDS " + ", ".join(ast.fields)
+        if ast.kind:
+            out += " " + ast.kind
+            if ast.target is not None:
+                out += " " + _emit(ast.target)
+        for_txt = "" if ast.cond is None else " FOR " + _emit(ast.cond)
+        while_txt = ("" if ast.while_cond is None
+                     else " WHILE " + _emit(ast.while_cond))
+        if ast.while_first and for_txt and while_txt:
+            out += while_txt + for_txt
+        else:
+            out += for_txt + while_txt
+        if ast.alias is not None:
+            out += " IN " + ast.alias
+        if ast.nooptimize:
+            out += " NOOPTIMIZE"
+        return out
     if isinstance(ast, Return):
         if ast.expr is None:
             return "RETURN"
         return "RETURN %s%s" % ("@" if ast.by_ref else "", _emit(ast.expr))
     if isinstance(ast, Dim):
-        return "DIMENSION " + _dim_declarator(ast.name, ast.dims, ast.bracket)
+        return "DIMENSION " + _dim_declarator(ast.name, ast.dims, ast.bracket,
+                                              ast.as_type)
     if isinstance(ast, DimList):
         return "DIMENSION " + ", ".join(
-            _dim_declarator(n, dims, br) for n, dims, br in ast.items)
+            _dim_declarator(n, dims, br, tp) for n, dims, br, tp in ast.items)
     if isinstance(ast, With):
         head = "WITH " + _emit(ast.expr)
         if getattr(ast, "as_class", None):
@@ -19666,14 +20560,20 @@ def _emit_line(ast):
     if isinstance(ast, CreateStmt):
         if ast.sql_view is not None:
             out = "CREATE SQL VIEW %s" % ast.sql_view
-            if ast.remote:
-                out += " REMOTE"
-            out += " CONNECTION %s" % ast.remote_connection
-            if ast.share:
-                out += " SHARE"
+            # r148-createlocal: a None connection is the LOCAL view — the
+            # whole [REMOTE] CONNECTION <conn> [SHARE] span was unspelled.
+            if ast.remote_connection is not None:
+                if ast.remote:
+                    out += " REMOTE"
+                out += " CONNECTION %s" % ast.remote_connection
+                if ast.share:
+                    out += " SHARE"
             return out + " AS %s" % ast.as_query
         if ast.name is not None:
-            return "CREATE %s" % ast.name
+            out = ("CREATE %s" % ast.name).rstrip()
+            if ast.create_from is not None:
+                out += " FROM %s" % ast.create_from
+            return out
         if ast.form is not None:
             out = "CREATE FORM %s" % ast.form
             if ast.form_as is not None:
@@ -19698,6 +20598,11 @@ def _emit_line(ast):
             if ast.nowait:
                 out += " NOWAIT"
             return out
+        if ast.classlib is not None:
+            text = "CREATE CLASSLIB"
+            if ast.classlib:
+                text += " " + ast.classlib
+            return text
         if ast.database is not None:
             text = "CREATE DATABASE"
             if ast.database:
@@ -19723,6 +20628,11 @@ def _emit_line(ast):
         if ast.values is None:
             return out + " FROM MEMVAR"
         return out + " VALUES (%s)" % ", ".join(_emit(v) for v in ast.values)
+    if ast == (".",):
+        # r181-dotstmt: the empty WITH-scope member run; re-emits as the
+        # lone dot, which recompiles to the one-byte 99 frame. Beside the
+        # verb bank below, not in it: the dot is not a command verb.
+        return "."
     if isinstance(ast, tuple) and len(ast) == 1 and (
             ast[0] in (
                 "APPEND", "APPEND BLANK", "QUIT", "CLEAR", "DELETE", "ENDSCAN",
@@ -19740,13 +20650,17 @@ def _emit_line(ast):
                 # r50-leadsweep: the one-byte command bank and its measured
                 # one-byte modifiers, plus the two TRANSACTION frames
                 "ASSIST", "CHANGE", "DIR", "DISPLAY", "DISPLAY MEMORY",
-                "DISPLAY STATUS", "EDIT", "EJECT", "EJECT PAGE", "RESUME",
+                "DISPLAY STATUS", "DISPLAY OBJECTS",
+                "EDIT", "EJECT", "EJECT PAGE", "RESUME",
                 "RETRY", "LOGOUT", "UNLOCK", "UNLOCK ALL", "FLUSH",
                 "FLUSH FORCE", "BLANK", "RESET", "ROLLBACK",
                 "BEGIN TRANSACTION", "END TRANSACTION",
                 "DELETE ALL", "BROWSE", "PUSH KEY CLEAR", "LOCATE", "RECALL",
                 "INSERT", "INSERT BEFORE",
-                "INSERT BLANK", "INSERT BEFORE BLANK", "SUSPEND")
+                "INSERT BLANK", "INSERT BEFORE BLANK", "SUSPEND",
+                # r203-insafter: the AFTER frames of the INSERT bank
+                "INSERT AFTER",
+                "INSERT AFTER BLANK")
             or ast[0].startswith("PUSH MENU ")
             or ast[0].startswith("POP MENU ")
             or ast[0].startswith("ZAP IN ")
@@ -19842,11 +20756,14 @@ def _emit_line(ast):
     if isinstance(ast, MkdirStmt):
         return ("RMDIR " if ast.remove else "MKDIR ") + ast.path
     if isinstance(ast, ListToFileStmt):
-        out = "LIST"
+        out = ast.verb
         if ast.clause is not None:
             out += " " + ast.clause
         if ast.like_pattern is not None:
-            out += " LIKE " + ast.like_pattern
+            # A grouped LIKE operand carries its own parentheses; the bare
+            # skeleton is emitted back unquoted, as the shipped arm did.
+            out += " LIKE " + (_emit(ast.like_pattern) if ast.like_group
+                               else ast.like_pattern)
         # measured spellings differ: plain TO under a clause byte (foxcharts
         # L3306/L3310), TO FILE on the bare form (VFPxWorkbookXLSX L516 family)
         out += " TO" + ("" if ast.clause is not None else " FILE")
@@ -19892,8 +20809,11 @@ def _emit_line(ast):
             out += " DATA %s" % _emit(ast.data_expr)
         return out
     if isinstance(ast, AppendMemoStmt):
+        # r180-appendmemo: an ungrouped fb operand is the bare filename
+        # spelling; quoting it recompiles to the fc-grouped frame instead.
         return "APPEND MEMO %s FROM %s%s" % (
-            ast.field_name, _emit(ast.source),
+            ast.field_name,
+            ast.source.text if ast.bare_name else _emit(ast.source),
             " OVERWRITE" if ast.overwrite else "")
     if isinstance(ast, CopyStmt):
         # The source order VFP9 documents, which is not the wire order: the
@@ -19963,6 +20883,8 @@ def _emit_line(ast):
         return "OTHERWISE"
     if isinstance(ast, ExitStmt):
         return "EXIT"
+    if isinstance(ast, StrayEndifStmt):
+        return "ENDIF"
     if isinstance(ast, DoWhile):
         lines = ["DO WHILE " + _emit(ast.cond)]
         lines += _indent(ast.body)
@@ -20020,9 +20942,9 @@ def _emit_line(ast):
                 lines.append("    " + cl.verbatim if cl.verbatim is not None
                              else "    CASE " + _emit(cl.cond))
                 lines += _indent(_indent(cl.body))
-            if ast.otherwise_body is not None:
+            for oth_body in ast.otherwise_bodies:
                 lines.append("    OTHERWISE")
-                lines += _indent(_indent(ast.otherwise_body))
+                lines += _indent(_indent(oth_body))
         lines.append("ENDCASE")
         return "\n".join(lines)
     if isinstance(ast, WaitStmt):
@@ -20030,7 +20952,11 @@ def _emit_line(ast):
             return "WAIT CLEAR"
         to_var = getattr(ast, "to_var", None)
         if ast.expr is None and to_var is None:
-            head = "WAIT"
+            # r158-waittimeout: a message-less WINDOW frame (bare_wait
+            # False on every 52 2c frame) keeps its WINDOW keyword; the
+            # bare arm's statement-final TIMEOUT node is the only frame
+            # that reaches here with bare_wait True.
+            head = "WAIT" if ast.bare_wait else "WAIT WINDOW"
         elif ast.bare_wait:
             head = "WAIT %s" % _emit(ast.expr)
         elif to_var is not None:

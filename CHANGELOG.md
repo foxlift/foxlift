@@ -3,6 +3,55 @@
 FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the version in
 `pyproject.toml`.
 
+## 0.8.0 — 2026-09-25
+
+The wave-4 close: every wave-4 lane measured together on one tree, both sealed
+splits opened once, and a table-path measurement defect found and corrected
+before either seal opened.
+
+- Development split of the second corpus: every section lifts, 103,363 of
+  103,363 with zero leaked bytes (0.7.0: 103,317). The record-level blocker
+  queue is empty. Compiled programs 5,305 of 5,476.
+- First corpus: every development, validation and held-out section lifts, and
+  the last six named refusals are closed. Two of them were shapes earlier
+  rounds had registered as unreachable: `28 08 2d` is INSERT BLANK AFTER, and a
+  bare `b8` is the stray ENDIF VFP9 still writes beside its own "IF | ELSE |
+  ENDIF statement is missing" diagnostic. Compiled programs recompile 1,051 of
+  1,051.
+- Both sealed splits opened once at the close, with no tuning after. The
+  held-out split of the first corpus lifts 1,030 of 1,030 sections (0.6.0:
+  1,023). The sealed split of the second corpus lifts 13,969 of 13,978 (99.94%,
+  0.6.0: 13,845): 25 of its 30 refusal classes emptied, none new, none grew.
+  Its table path reads 3,807 of 3,971, eight sections below the wave-3 reading
+  in one registered symbol-table pattern.
+- Table-path measurement fix. VFP9's COMPILE CLASSLIB drops deleted records,
+  and the table path paired original and recompiled records by position, so
+  every record after a deleted one was scored against the wrong neighbour.
+  Every table-path figure now carries the historic positional reading beside
+  a live-record reading, with sections inside deleted records counted on
+  their own line. Second-corpus development: 274,063 of 279,698 positional
+  (0.6.0: 273,404) and 275,323 of 277,658 live-record (99.16%), 2,040 sections
+  in deleted records. First-corpus held-out: every live section recompiles
+  equal, 1,524 of 1,524.
+- Authored population 1,880 of 1,917 equal, 0 regressed by name. Member
+  conservation holds on both corpora with zero no-trace members; named
+  refusals on the second corpus fell from 474 at the wave-3 close to 85.
+- Statement banks measured and read since 0.7.0: COUNT TO an array element;
+  CREATE SQL VIEW with no connection; DEFINE WINDOW NAME; DIMENSION ... AS;
+  GETEXPR TO; ON KEY LABEL with a quoted label; negative numeric widths; the
+  shared DISPLAY/LIST OBJECTS frame; DEFINE PAD name, OF, BEFORE and AFTER
+  slots; ON PAD operands; HIDE WINDOW ALL; DEFINE BAR KEY and DEFINE BAR OF a
+  quoted popup; WAIT WINDOW TIMEOUT and an optional message; bare CREATE,
+  CREATE CLASSLIB and keyword-less CREATE; ON READERROR; DECLARE DOUBLE; LIST
+  MEMORY; POP MENU TO MASTER; chained OTHERWISE; ASCAN's stranded opener;
+  APPEND MEMO FROM; the lone WITH-scope dot; EDIT with BROWSE's clauses; FLUSH
+  with an operand; BLANK with its record scope; RENAME CLASS; DEFINE MENU;
+  ACTIVATE POPUP with a quoted name; DO FORM ... WITH argument order; negated
+  SELECT columns; and bracket-quoted literals that hold an apostrophe.
+- The compile oracle's table-path driver refuses a session whose code page has
+  drifted, and the matrix instrument keeps the module VFP9 writes beside a
+  diagnostic, which is how the stray-ENDIF producer was found.
+
 ## 0.7.0 — 2026-09-17
 
 Wave 4 on the development split of the second corpus, seals still shut.

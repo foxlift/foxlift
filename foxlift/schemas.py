@@ -73,6 +73,7 @@ PARAMETERS_LEAD = 0x34  # 34 f7 <sym> name-list (HARVEST.md round-3, oracle-meas
 ON_SELECTOR_ERROR = 0x10        # n01/n12
 ON_SELECTOR_ESCAPE = 0xBD       # n03; collides with THROW only outside lead 31
 ON_SELECTOR_SHUTDOWN = 0xCD     # n05
+ON_SELECTOR_READERROR = 0xC8    # r160-onreaderror; same byte as ON_BARE_READERROR, this lead
 ON_SELECTOR_KEY_LABEL = 0x17    # n04; then the KEY LABEL marker:
 ON_KEY_LABEL_MARK = 0x32        # label itself an fb string, then the handler string
 ON_SELECTION_PREFIX = 0xD0      # SELECTION family opener (n08-n10)
@@ -157,6 +158,11 @@ DECLARE_TYPE_LONG = 0xD4
 DECLARE_TYPE_STRING = 0xD6
 DECLARE_TYPE_SHORT = 0x57
 DECLARE_TYPE_OBJECT = 0x2E
+# r161-decldbl: 0x0F is DOUBLE in both the return slot and every
+# parameter slot (37 compiled / 5 diagnostic / 0 cut_short; the six
+# shipped types unmoved). Position-resolved: 0x0F is DOUBLE under the
+# DEFINE WINDOW lead too, NE under f5_cmp.
+DECLARE_TYPE_DOUBLE = 0x0F
 DECLARE_PARAM_BYREF = 0x18
 
 # ---- TEXT...ENDTEXT frame and WITH AS clause, round-23 FORCED -----------------------------------
@@ -199,6 +205,8 @@ RETURN_BYREF = 0x04  # r50-sysapp: 'RETURN @<expr>' puts an 04 in front of the
                      # group; no unmarked spelling produces one, so the two are
                      # wire-distinguishable and the '@' is recoverable.
 DIM = 0x15         # 15 <name f6> fc <dim> fd [07 fc <dim> fd]* 03 (f8_arr/f8_ar2)
+                     # r150-dimas: each declarator may carry the AS clause after
+                     # its own closer — [51 (fb|d9) <u16len> <text>] per declarator
 WITH = 0xA6        # a6 fc <expr> fd f9 05 <u16 slot-word>        (f8_wit; word stable across runs)
 ENDWITH = 0xA7     # a7
 EXPRSTMT = 0x86    # 86 fc <expr> fd                              (f7_cal "= F()")
@@ -214,6 +222,8 @@ EXPRSTMT_BARE = 0x99 # 99 fc <expr> …      bare call/reference line, NO "=" pr
                      # (the trailing fd of the fc-form is consumed by the reader's fd-fe strip)
 IF_LEAD = 0x25       # 25 fc <cond> fd f9 05 <u16 rel-target>; body; ENDIF
 ENDIF_LEAD = 0x1E    # bare ENDIF statement
+STRAY_ENDIF_LEAD = 0xB8  # an ENDIF with no IF open: VFP9 writes this bare
+                         # byte beside its missing-IF diagnostic (r203-b8err)
 # NOTE 0x0C doubles as DIV inside expressions; context (statement lead) disambiguates.
 DO_CASE_LEAD = 0x18  # 18 48 f9 05 <t1> f9 05 <t2>: DO CASE opener. FORCED 22/22:
                      # t1 = first CASE prefix - code_base, t2 = matching ENDCASE - code_base.
@@ -224,8 +234,11 @@ CASE_CLAUSE = 0x0C   # 0c fc <cond> fd f9 05 <u16>: CASE clause; u16 = next-clau
                      # LONG-jump width of the same landing: [fd] e9 00 <u32>, exact
                      # end-of-statement (oaremotion1.scx::rtx s14 clauses).
 ENDCASE_LEAD = 0x1C
-OTHERWISE_LEAD = 0x32   # 32 f9 05 <u16>: OTHERWISE clause; u16 = ENDCASE prefix -
-                        # code_base (same anchor family), forced by _outputdialog.
+OTHERWISE_LEAD = 0x32   # 32 f9 05 <u16>: OTHERWISE clause; u16 = the NEXT clause
+                        # mark of the frame - code_base; the marks chain, the LAST
+                        # of a run names the ENDCASE (r178-othchain). With a single
+                        # OTHERWISE the next mark IS the ENDCASE, which is the
+                        # shipped n=1 reading forced by _outputdialog.
                         # Round-42 adds the long-jump width 32 e9 00 <u32>, length
                         # exactly 7 (listener.vcx u32-framed methods; oracle
                         # sibling-forced and overflow-forced compiles).  # bare ENDCASE
@@ -272,6 +285,14 @@ DEFINE_WINDOW_KW = 0x2C   # DEFINE WINDOW ... (m1 replica byte-exact); also the
                           # s38[4]). WINDOWS / WINDOW w1 collapse to the same.
 DEFINE_POPUP_KW = 0xC6    # DEFINE POPUP / ACTIVATE POPUP object keyword
 DEFINE_BAR_KW = 0x06      # DEFINE BAR <n> OF <popup> (g3/g4)
+DEFINE_MENU_KW = 0x1C     # DEFINE MENU <name> ... (r186-definemenu); the MENU
+                          # byte RELEASE_WORDS, DEACTIVATE_WORDS,
+                          # SET_OF_OBJECT_WORDS and ON_SELECTION_MENU already
+                          # spell — lead 0x73 decides. MENU and MENUS collapse
+                          # to one frame.
+MENU_LINE_MARK = 0xC1     # the LINE sub-word behind DEFINE_WIN_AT under this
+                          # lead; DEFINE_WIN_GROW elsewhere — position decides
+MENU_NOMARGIN_MARK = 0xD2 # NOMARGIN flag; WHEN / JOIN / CDX elsewhere
 
 # CLEAR's operand bank under lead 0x0e — ONE keyword byte and nothing else,
 # swept whole on the oracle (r54-clearbank: every keyword VFP9's CLEAR accepts,
@@ -292,8 +313,10 @@ CLEAR_CLASSLIB = 0x52     # CLEAR CLASSLIB <name>, the name an fb/d9 literal
 DEFINE_PAD_KW = 0xBC      # DEFINE PAD <name> OF _MSYSMENU (r43-pad); 0xBC is
                           # FINALLY / ON PAD / ACTIVATE elsewhere — lead 0x73
                           # decides
-PAD_BEFORE_MARK = 0xBE    # BEFORE <pad> = be f7<sym> (r43-pad); WINDOW CLOSE
+PAD_BEFORE_MARK = 0xBE    # BEFORE <pad> = be f7<sym> (r43-pad) or be ec<id> (r175-padbefore); WINDOW CLOSE
                           # is the same byte under DEFINE WINDOW
+PAD_AFTER_MARK = 0x2D     # AFTER <pad> = 2d f7<sym> or 2d ec<id> (r191-padafter), the BEFORE twin;
+                          # SET_RELATION_ID / LOCATE_LEAD / FALSE share the byte elsewhere
 PAD_MARK_CLAUSE = 0xC7    # MARK <expr> (r43-pad); STEP_MARK in FOR, position
                           # decides
 PAD_NEGOTIATE_MARK = 0x54 # NEGOTIATE LEFT = 54 58 (r43-pad); assignment lead
@@ -381,6 +404,15 @@ ACTIVATE_SCREEN_KW = 0x26     # 74 26 = ACTIVATE SCREEN (audit-B order-4 corpus 
                               # statement position under lead 0x74 decides
 BROWSE_LEAD = 0x09            # 09 2c f7<w> ... = BROWSE WINDOW (m5); collides with
                               # AND_APPLY (expression namespace) — statement position decides
+EDIT_LEAD = 0x19              # 19 2c f7<w> ... = EDIT WINDOW (r182-editbrowse);
+                              # EDIT carries BROWSE's whole clause bank, the
+                              # tails byte-identical under both leads. The byte
+                              # is BROWSE's own LOCK clause byte in CLAUSE
+                              # position — statement position decides.
+# The leads that share BROWSE's clause frame, each with the word it emits.
+# Measured leads only: CHANGE 0x0d compiles identically but no carrier holds
+# it with a tail, so it stays in the one-byte bank.
+BROWSE_WORDS = {BROWSE_LEAD: "BROWSE", EDIT_LEAD: "EDIT"}
 BROWSE_TITLE_MARK = 0x27      # 27 fc<TITLE>fd (m5)
 BROWSE_TIMEOUT_MARK = 0xCE    # ce fc<TIMEOUT>fd (m5); cross-binds round-15's WAIT
                               # TIMEOUT byte (TEXT_FLAG_NOSHOW is another namespace)
@@ -461,6 +493,10 @@ PARAM_OF_MARK = 0xC3          # typed parameter 'As Class Of library': c3 fb<lib
 CREATE_LEAD = 0x13            # bare CREATE <name> = 13 fb<name> (CMD_SWEEP);
 CREATE_FORM_KW = 0x26         # 26 under lead 0x13: CREATE FORM (r125-cr26);
 CREATE_CLASS_KW = 0x4F        # 4f under lead 0x13: CREATE CLASS (r126-cr4f);
+CREATE_CLASSLIB_KW = 0x52     # 52 under lead 0x13: CREATE CLASSLIB
+                              # (r169-cr52); the same CLASSLIB word RELEASE
+                              # spells under 3c and COMPILE under 83 — CREATE's
+                              # bank is MODIFY's, and MODIFY has no CLASSLIB.
 CREATE_FORM_NOWAIT = 0x3A     # NOWAIT after the FORM name
 CREATE_FORM_SAVE = 0x25       # SAVE
 CREATE_FORM_DEFAULT = 0x0E    # DEFAULT. Compiler order is 3a 25 0e.
@@ -701,6 +737,12 @@ DELETE_SCOPE_WORDS = {0x03: "ALL", 0x24: "REST", 0x1E: "NEXT",
 DELETE_SCOPE_COUNTED = {"NEXT", "RECORD"}
 DELETE_WHILE_MARK = 0x2B      # WHILE <cond>, its own fc-group
 DELETE_NOOPTIMIZE = 0x30      # NOOPTIMIZE, wired in FRONT of the scope word
+BLANK_LEAD = 0x93        # r184-blank: BLANK [FIELDS <list>] [<scope>]
+                         # [FOR <c>] [WHILE <c>] [IN <area>] [NOOPTIMIZE].
+                         # Wire order is 93 [16 <alias>] [11 <list>] [30]
+                         # [<scope>] [13 fc <for>] [2b fc <while>] — the
+                         # DELETE bank (r54-inalias) plus the 11 FIELDS
+                         # list. Everything else is reused unchanged.
 
 DROP_LEAD = 0x6A         # DROP TABLE 31 / DROP VIEW c4
 SQL_SET_MARK = 0xCA      # the SET mark; the same ca INDEX TAG spends
@@ -805,6 +847,13 @@ UNLOCK_LEAD = 0x5A       # r76-unlock: UNLOCK [RECORD <n>] [IN <area>] [ALL]
 UNLOCK_IN_MARK = 0x16
 UNLOCK_RECORD_MARK = 0x23
 UNLOCK_ALL_SCOPE = 0x03
+FLUSH_LEAD = 0x5B         # r183-flush: FLUSH [<name expr>] [FORCE] —
+                          # `5b [fc <expr> [fd]] [ca]`. The operand is the
+                          # statement's own group, the same one _r50_operand
+                          # reads; the closer is elided when it ends the
+                          # statement. There is no 03 ALL scope byte on this
+                          # lead — `FLUSH ALL` lexes ALL as a file name.
+FLUSH_FORCE_MARK = 0xCA   # the FORCE byte DOEVENTS also spends on lead 0xb7
 # r76-modify: the byte behind lead 0x2f names the subcommand — one keyword byte
 # per kind, measured whole against every MODIFY VFP9 documents. MODIFY SCREEN
 # is not a keyword of its own: it compiles to FORM's byte with no operand.
@@ -1507,6 +1556,8 @@ INSERT_ARRAY_MARK = 0x04  # INSERT INTO <t> FROM ARRAY <arr>: 15 04 <operand>
 INSERT_BLANK_LEAD = 0x28  # INSERT BLANK is 28 08; BEFORE appends be
 INSERT_BLANK_MARK = 0x08
 INSERT_BEFORE_MARK = 0xBE
+INSERT_AFTER_MARK = 0x2D  # INSERT [BLANK] AFTER: 28 [08] 2d (r203-insafter),
+                          # the AFTER mark DEFINE PAD/BAR spend beside be
 SUSPEND_LEAD = 0x4C      # one-byte SUSPEND (r47-suspend; r42 cmd sweep)
 SQLSEL_GROUP_MARK = 0xBF  # SELECT GROUP BY: bf fc <n> fd [07 fc <n> fd]*
 SQLSEL_HAVING_MARK = 0xC0  # SELECT HAVING: c0 fc <cond> fd, after GROUP BY
@@ -2013,6 +2064,18 @@ MEASURED_EA_GROUP_CLOSERS = {
 if not set(MEASURED_EA_GROUP_CLOSERS) <= BUILTIN_ESCAPES.keys():
     raise AssertionError("ea-arity closer missing from measured registry")
 
+# r179-eastrand: the ea closers whose STRANDED doubled-opener frame closes
+# implicitly. An element read with a subscript list rides its own `43`
+# packet and owns no closer, so it takes the nested callee's closer and the
+# frame that opened the pair is left holding one finished value with the
+# enclosing callee in front of it. Only these ids may close that frame; an
+# id whose lower bound is one already accepts the strand and needs no arm,
+# so the set is asserted against the bound it depends on.
+EA_STRANDED_PAIR_CLOSERS = frozenset({0x11})  # ASCAN
+if any(MEASURED_EA_GROUP_CLOSERS[_i][0] < 2
+       for _i in EA_STRANDED_PAIR_CLOSERS):
+    raise AssertionError("stranded-pair ea closer with a one-operand lower bound")
+
 # ---- bare system-variable reads (SYSVAR_READ <u8 id>) ---------------------------------------
 # Family shape ORACLE-measured: round 21 emitted '_cliptext' as the two raw bytes
 # 'ed 1d' with no e1 prefix (probes/oracle_harvest/round21_streams.json stream e3 =
@@ -2219,13 +2282,14 @@ POPUP_IN_MARK = 0x16         # IN <name>: 16 f7 <u16>. Byte doubles as GO_IN_CLA
                              # under lead 23 and as ACTIVATE WINDOW's IN under lead
                              # 74 — position under DEFINE_LEAD decides.
 #
-# DEFINE BAR <n> OF <popup> [22 PROMPT] [41 STYLE] [1d MESSAGE] [17 KEY] [c913 SKIP FOR]
-#                           [c2 PICTURE]
+# DEFINE BAR <n> OF <popup> [22 PROMPT] [41 STYLE] [1d MESSAGE] [c913 SKIP FOR]
+#                           [0d4e COLOR SCHEME] [c7 MARK] [17 KEY] [c2 PICTURE]
 #   e02 `… PROMPT "p" MESSAGES "m" STYLE "B"` and e03 `… PROMPT "p" STYLE "B" MESSAGES "m"`
 #   compile to the SAME stream (…22 fc"p"fd 41 fc"B"fd 1d fc"m"), so the wire order is
 #   canonical and independent of the source order; e04/e05 isolate each clause alone;
-#   e11 pins the full order 22 -> 41 -> 1d -> c913 -> c2; e07 shows the KEY text after
-#   the comma is OPTIONAL (`KEY CTRL+A` -> 17 fb<key>, no 07 group).
+#   e11 pins the order 22 -> 41 -> 1d -> c913 -> c2 without KEY (it carried no KEY);
+#   r157-barkey ranks KEY behind MARK c7 and in front of PICTURE c2; e07 shows the
+#   KEY text after the comma is OPTIONAL (`KEY CTRL+A` -> 17 fb<key>, no 07 group).
 BAR_STYLE_MARK = 0x41        # STYLE fc<expr>fd (e02/e03/e04/e11)
 BAR_MESSAGE_MARK = 0x1D      # MESSAGE fc<expr>fd (e05/e11; round-37 w_b09 `MESS ""`)
 
@@ -2260,8 +2324,24 @@ DEFINE_POPUP_CLAUSES = (
     (0xBD, "flag", "MOVER"),
     (POPUP_SHORTCUT_MARK, "flag", "SHORTCUT"),
 )
-BAR_KEY_MARK = 0x17          # KEY fb<key-text> [07 fc<label>fd] (round-37 D6, e07).
+BAR_KEY_MARK = 0x17          # KEY fb<key-text> [07 fc<label>fd] (round-37 D6, e07;
+                             # r157-barkey ranks it behind MARK c7, in front of PICTURE c2).
                              # Byte doubles as ON_SELECTOR_KEY_LABEL under lead 31.
+# DEFINE MENU's clause list, in the ONE canonical order the wire stores it
+# in (r186-definemenu: every source permutation of a clause set compiles to
+# one frame). Each entry is (byte, operand kind, source word); the kinds are
+# the ones DEFINE_POPUP_CLAUSES already names, plus "atline" for the two-byte
+# `05 c1` mark and "key" for KEY's ungrouped fb literal.
+DEFINE_MENU_CLAUSES = (
+    (DEFINE_BAR_KW, "flag", "BAR"),
+    (DEFINE_WIN_AT, "atline", "AT LINE"),
+    (BAR_MESSAGE_MARK, "group", "MESSAGE"),
+    (WIN_SCHEME_MARK[0], "scheme", "COLOR SCHEME"),
+    (PAD_MARK_CLAUSE, "group", "MARK"),
+    (BAR_KEY_MARK, "key", "KEY"),
+    (POPUP_IN_MARK, "name", "IN WINDOW"),
+    (MENU_NOMARGIN_MARK, "flag", "NOMARGIN"),
+)
 #
 # Popup verbs that ride their own statement leads (round-37 D5 measured the paren-name
 # spellings; e06 adds the bare-name ones that the corpus carries).
