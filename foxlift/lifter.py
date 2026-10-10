@@ -2415,7 +2415,6 @@ class _sym_tap:
     """Collect the symbol indexes one clause's decode resolves.
 
     Re-entrant on purpose: a clause the reader decodes in more than one attempt
-    (the SQL WHERE tries its LIKE matrix before the generic expression reader)
     accumulates into the same list, and the lowest new index is the same either
     way.
     """
@@ -7446,6 +7445,17 @@ def _dec_lvalue(buf, i, end, syms):
                 chained, k2 = _dec_object_chain(buf, i, end, syms)
                 if chained.calls and not chained.tail \
                         and chained.calls[-1][1]:
+                    # r288-elemdeclclose: the declarator link's own bracket
+                    # closer 16 is read here when the assignment marker 10 fc
+                    # follows, as the paren closer 03 is by the chain's f6 link.
+                    # Oracle round 288 (a_asg_nrow_br, a_asg_pa_br): an element
+                    # link with a f6 declarator closed by 16 compiles to
+                    # `54 f4 e5 ... f6 <arr> fc <sub> fd 16 10 fc <rhs>`; the
+                    # bracket closes the declarator's own subscript list.
+                    if k2 + 1 < end and buf[k2] == 0x16 \
+                            and buf[k2 + 1] == 0x10:
+                        chained.call_brackets[-1] = True
+                        return chained, k2 + 1
                     return chained, k2
             raise Unsupported("indexed-member property component missing")
         prop = _sym(syms, S.u16(buf, j + 1))
@@ -7655,12 +7665,20 @@ def _dec_at_get(buf, j, end, syms):
     `@` row/col pair (optionally behind COLOR and the SAY group) under lead
     0x04 (r237-atfont). Returns ((var, default, font, style, size, range),
     next) in the one canonical wire order. The GET operand is always a bare
-    `f7 <u16>` symbol (plain, dotted and field variables alike — the m.
-    prefix leaves no byte); anything else in the var slot keeps the
-    `@ GET var form` refusal. A fourth SIZE group keeps `@ SIZE form`."""
+    `f7 <u16>` symbol (plain, dotted and field variables alike); a memory
+    variable `m.x` leaves `f5 0d` ahead of that symbol (r288-atgetmemvar),
+    and anything else in the var slot keeps the `@ GET var form` refusal.
+    A fourth SIZE group keeps `@ SIZE form`."""
     j += 1  # past the c1 mark
     if j + 3 <= end and buf[j] == S.SYM:
         var, j = _sym(syms, S.u16(buf, j + 1)), j + 3
+    elif j + 5 <= end and buf[j] == S.WORKAREA_REF and buf[j + 1] == 0x0D \
+            and buf[j + 2] == S.SYM:
+        # r288-atgetmemvar: `@ 5,9 GET m.lcVar` leaves the memvar prefix f5 0d
+        # ahead of the symbol, and `GET lcVar` leaves none. Oracle round 288
+        # (c_get_m, c_say_get_m, c_pic_get_m, c_valid_get_m against c_get_plain):
+        # `c1 f5 0d f7 <sym>` after the SAY and PICTURE groups, rendered m.<name>.
+        var, j = "m." + _sym(syms, S.u16(buf, j + 3)), j + 5
     else:
         raise Unsupported("@ GET var form")
     default = None
@@ -11211,7 +11229,7 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
                        star_lead_txt, star_tail_txt, tbl, where_expr,
                        group_terms, having_expr, order_terms, into_txt,
                        to_txt, readwrite, nofilter, display, syms,
-                       cur_literal, where_tap, cols_after=None,
+                       cur_literal, where_new, cols_after=None,
                        star_mid=False, star_mid_txt="*",
                        order_before_where=False):
     """The SELECT statement text, once every clause has been read.
@@ -11298,11 +11316,15 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
     # GROUP BY or HAVING in the same statement gives INTO a third position
     # and neither of those orders is measured. ORDER BY with WHERE is
     # r271-orderfirst, above; INTO still follows both.
+    # r290-intowhere: only the names the WHERE introduces decide it. The FROM
+    # table, a FROM alias and a projection column are numbered ahead of the
+    # INTO cursor whichever order the source wrote, so a WHERE that names one
+    # of them says nothing about its position (oracle round290_intowhere.json).
     into_first = (
         where_expr is not None and not group_terms and not order_terms
         and having_expr is None
         and _written_first(_table_new_index(syms, cur_literal),
-                           where_tap.first_new()))
+                           min(where_new, default=None)))
     # r37 P3 (C13): the d7 tag is emitted ONCE, by _emit_line via the
     # readwrite flag — appending it here too doubled the tag on the
     # wire-visible text ('READWRITE READWRITE', rejected by VFP). The tag
@@ -16139,9 +16161,9 @@ def _dec_statement(buf, syms):
         # r49-clauseorder: the symbols this clause introduces, against which the
         # INTO clause's own table entry says which of the two the source wrote
         # first
-        where_tap = _sym_tap()
         _where_already = set(_SYM_SEEN)
         _where_mark = len(_SYM_SEEN)
+        _where_at = pos
         if pos < end and buf[pos] == 0xC7:
             pos += 1
             if pos < end and buf[pos] == 0xC6:
@@ -16152,14 +16174,12 @@ def _dec_statement(buf, syms):
                 # a non-matching condition falls through to the generic
                 # expression decoder exactly as before (messages preserved).
                 try:
-                    with where_tap:
-                        wnode, wk = _dec_sql_like_cond(buf, pos + 1, end, syms)
+                    wnode, wk = _dec_sql_like_cond(buf, pos + 1, end, syms)
                     where_expr = wnode
                     pos = wk
                 except Unsupported:
-                    with where_tap:
-                        wes, wk = _dec_expr(buf, pos + 1, end, syms,
-                                            stop_bytes=_IF_COND_STOP)
+                    wes, wk = _dec_expr(buf, pos + 1, end, syms,
+                                        stop_bytes=_IF_COND_STOP)
                     wk = _clause_group_close(buf, wk, end)
                     if len(wes) != 1 or wk is None:
                         raise Unsupported("SQL WHERE unresolved")
@@ -16176,8 +16196,7 @@ def _dec_statement(buf, syms):
             # leaves this branch inert so every previously-decoded stream keeps
             # its byte-for-byte behavior (and its exact blocking message).
             try:
-                with where_tap:
-                    wnode, wk = _dec_sql_like_cond(buf, pos + 2, end, syms)
+                wnode, wk = _dec_sql_like_cond(buf, pos + 2, end, syms)
                 where_expr = wnode
                 pos = wk
             except Unsupported:
@@ -16189,9 +16208,8 @@ def _dec_statement(buf, syms):
                 # c7-c6 branch uses. A non-matching condition stays INERT so
                 # every previously-blocked stream keeps its exact message.
                 try:
-                    with where_tap:
-                        wes, wk = _dec_expr(buf, pos + 2, end, syms,
-                                            stop_bytes=_IF_COND_STOP)
+                    wes, wk = _dec_expr(buf, pos + 2, end, syms,
+                                        stop_bytes=_IF_COND_STOP)
                     wk = _clause_group_close(buf, wk, end)
                     if len(wes) != 1 or wk is None:
                         raise Unsupported("SQL WHERE unresolved")
@@ -16200,6 +16218,12 @@ def _dec_statement(buf, syms):
                 except Unsupported:
                     pass
         _where_added = _SYM_SEEN[_where_mark:]
+        # r290-intowhere: the names the WHERE introduces, for the INTO order.
+        # _without_spelled_earlier reads the fb strings before the WHERE opener,
+        # which is where the FROM table name is stored, as it does before ORDER BY.
+        _where_new = _without_spelled_earlier(
+            buf, _where_at, syms,
+            _introduced(_where_added, _where_already, _SYM_TABLE_HI))
         # r42-selgroup: GROUP BY is bf fc <n> fd [07 fc <n> fd]* after WHERE
         # and before ORDER BY. The INTO scanner used to skip bf and drop it.
         group_terms = []
@@ -16370,7 +16394,7 @@ def _dec_statement(buf, syms):
                 distinct, top_n, cols, star_leading, star_extra,
                 star_lead_txt, star_tail_txt, tbl, where_expr, group_terms,
                 having_expr, order_terms, into_txt, to_txt, readwrite,
-                nofilter, display, syms, cur_literal, where_tap,
+                nofilter, display, syms, cur_literal, _where_new,
                 cols_after=cols_after, star_mid=star_mid,
                 star_mid_txt=star_mid_txt,
                 order_before_where=order_before_where)
@@ -16434,7 +16458,7 @@ def _dec_statement(buf, syms):
             distinct, top_n, cols, star_leading, star_extra, star_lead_txt,
             star_tail_txt, tbl, where_expr, group_terms, having_expr,
             order_terms, into_txt, to_txt, readwrite, nofilter, display,
-            syms, cur_literal, where_tap, cols_after=cols_after,
+            syms, cur_literal, _where_new, cols_after=cols_after,
             star_mid=star_mid, star_mid_txt=star_mid_txt,
             order_before_where=order_before_where)
         j += 1
@@ -17217,6 +17241,17 @@ def _dec_statement(buf, syms):
             j = 1
         while True:
             lv, j = _dec_quoted_target(buf, j, end)
+            if lv is None and j + 5 <= end and buf[j] == S.WORKAREA_REF \
+                    and 0x01 <= buf[j + 1] <= 0x0A and buf[j + 2] == S.SYM:
+                # r288-replaceletter: a field qualified by a work-area letter is
+                # `f5 <01-0a> f7 <field>` in the REPLACE field list, the same
+                # bytes the expression reader reads as A.FIELD. Oracle round 288
+                # (d_repl_a, d_repl_b, d_repl_j, d_repl_qual_first,
+                # d_repl_brief): `3e f5 01 f7 <fb> d1 fc ... fd 07 ...` for
+                # REPLACE a.fb WITH ..., rendered with the letter.
+                lv = QualField(chr(ord("A") + buf[j + 1] - 1),
+                               _sym(syms, S.u16(buf, j + 3)))
+                j += 5
             if lv is None:
                 lv, j = _dec_lvalue(buf, j, end, syms)
             if buf[j] != S.REPLACE_WITH or buf[j + 1] != S.FC:
@@ -20564,6 +20599,55 @@ def lift_program(mod):
     return _place_lineno(_strip_verbatim_marks(out), mod)
 
 
+def _docase_stray_end(stmts, i, stop, syms, code_base, first):
+    """Index of the first CASE mark after the stray run that starts at ``i``.
+
+    r89-docase admits a workarea SELECT, a memvar assignment and a LOCAL in the
+    run the opener's t_first skips. r288-docasestray adds the three kinds the
+    oracle keeps in that run beside them (round 288, b_method_stray,
+    b_macro_stray, b_method_two_macro, b_method_nested): a bare method call
+    (lead 99), an unframed verbatim macro line, and a complete nested DO CASE
+    frame, which is skipped to its own ENDCASE. A framed verbatim line is a CASE
+    mark (r54-macrocase), and so is a verbatim line the opener's first target
+    ``first`` names; both end the run. Any other statement keeps the stray
+    verdict."""
+    while i < stop:
+        s = stmts[i]
+        if s.text is not None:
+            if s.jump_rel is not None or s.offset - code_base == first:
+                return i
+            i += 1
+            continue
+        lead = s.stream[0]
+        if lead in (S.CASE_CLAUSE, S.OTHERWISE_LEAD, S.ENDCASE_LEAD):
+            return i
+        if lead == S.DO_CASE_LEAD and len(s.stream) > 1 \
+                and s.stream[1] == S.DO_CASE_FRAME_MARK:
+            inner = dec_statement(s.stream, syms)
+            close = next((k for k in range(i + 1, stop)
+                          if stmts[k].text is None
+                          and stmts[k].stream[0] == S.ENDCASE_LEAD
+                          and stmts[k].offset - code_base == inner.t_end), None)
+            if close is None:
+                raise Unsupported("unexpected statement inside DO CASE")
+            i = close + 1
+            continue
+        if lead not in (S.SELECT_WA, S.ASSIGN, S.LOCAL, S.EXPRSTMT_BARE):
+            raise Unsupported("unexpected statement inside DO CASE")
+        try:
+            st = dec_statement(s.stream, syms)
+        except Unsupported:
+            raise Unsupported("unexpected statement inside DO CASE")
+        if lead == S.EXPRSTMT_BARE:
+            ok = isinstance(st, ExprStmt)
+        else:
+            ok = isinstance(st, (SelectStmt, Assign, Local))
+        if not ok:
+            raise Unsupported("unexpected statement inside DO CASE")
+        i += 1
+    raise Unsupported("DO CASE without ENDCASE")
+
+
 def _walk_block(stmts, i, stop, syms, stops=frozenset(), code_base=None,
                 stop_rel=None):
     """Emit stmts[i:stop]. Stops BEFORE any statement whose lead is in ``stops`` (the
@@ -20926,24 +21010,15 @@ def _walk_block(stmts, i, stop, syms, stops=frozenset(), code_base=None,
             # r89-docase: the opener's t_first skips the stray run the
             # oracle keeps in-frame ahead of the first CASE — a workarea
             # SELECT, an assignment, a LOCAL (each decoded by its shipped
-            # arm; anything else, or anything those arms refuse, keeps
-            # the stray verdict at the clause loop below).
-            strays = []                         # (ast, stmt) in order
-            while pos < stop:
-                s2 = stmts[pos]
-                if s2.text is not None:
-                    break
-                if s2.stream[0] not in (S.SELECT_WA, S.ASSIGN, S.LOCAL):
-                    break
-                try:
-                    st = dec_statement(s2.stream, syms)
-                except Unsupported:
-                    raise Unsupported(
-                        "unexpected statement inside DO CASE")
-                if not isinstance(st, (SelectStmt, Assign, Local)):
-                    break
-                strays.append((st, s2))
-                pos += 1
+            # arm). r288-docasestray adds the kinds _docase_stray_end admits;
+            # anything else keeps the stray verdict.
+            strays = []                         # emitted lines of the run
+            stray_end = _docase_stray_end(stmts, pos, stop, syms, code_base,
+                                          ast.t_first)
+            if stray_end > pos:
+                walked, pos = _walk_block(stmts, pos, stray_end, syms,
+                                          code_base=code_base)
+                strays = [ln for item in walked for ln in item.split("\n")]
             first_pos = pos
             while True:
                 if pos >= stop:
@@ -21041,7 +21116,7 @@ def _walk_block(stmts, i, stop, syms, stops=frozenset(), code_base=None,
                 raise Unsupported(f"do-case end target {ast.t_end} != ENDCASE "
                                   f"distance {want_end}")
             ast.clauses = collected
-            ast.strays = [st for st, _sst in strays]
+            ast.strays = strays
             ast.otherwise_bodies = otherwise_bodies
             out.extend(_emit_line(ast).split("\n"))
             i = pos + 1
@@ -22864,8 +22939,7 @@ def _emit_line(ast):
             # line for the compiler)
             # r89-docase: the stray run the opener's t_first skips emits
             # ahead of the first CASE, at clause level.
-            for st in ast.strays:
-                lines.extend("    " + ln for ln in _emit_line(st).split("\n"))
+            lines += _indent(ast.strays)
             for cl, _st in ast.clauses:
                 # r54-macrocase: a macro clause IS its stored line — re-emit it
                 # rather than rebuilding a CASE the compiler never compiled

@@ -15,6 +15,7 @@
 #               gaps bounded); the array tiles the payload between the header and the pool.
 # Names bind to segments BY ORDER (BUILD input order); counts must agree.
 
+import bisect
 import struct
 
 from dataclasses import dataclass, field
@@ -202,6 +203,20 @@ def _walk_records(buf: bytes, origin: int) -> list[Entry]:
     return entries
 
 
+def _pool_tail(names: list[str], name_offs: list[int], rel: int) -> str | None:
+    """r289-pooltail: the name at pool offset rel when rel lies strictly inside a slot.
+
+    Measured on VFP 9 BUILD APP and BUILD EXE output (probes/oracle_harvest/round289_pooltail.json):
+    a name that is the tail of a name stored earlier is not written again, and its record's
+    col_y points into that earlier name. Order decides: xopen.bmp then open.bmp merges,
+    open.bmp then xopen.bmp does not. Directory names merge the same way. None when rel is
+    not inside a slot's text (outside the names, or on a slot's terminating NUL)."""
+    k = bisect.bisect_right(name_offs, rel) - 1
+    if k < 0 or not rel < name_offs[k] + len(names[k]):
+        return None
+    return names[k][rel - name_offs[k]:]
+
+
 def load(path_or_buf, path="<bytes>") -> AppContainer:
     buf = path_or_buf.read_bytes() if hasattr(path_or_buf, "read_bytes") else path_or_buf
     base = container_base(buf)
@@ -255,22 +270,24 @@ def load(path_or_buf, path="<bytes>") -> AppContainer:
 
     # ---- binding: each record's col_y is a pool-relative NAME offset (measured on our
     # own BUILD APP canaries and consistent with reportoutput.app's pool layout).
+    # r289-pooltail: col_y may also land inside a slot, where BUILD stored the name as the
+    # tail of an earlier name; _pool_tail reads that tail (see its docstring).
     at = dict(zip(name_offs, names))
-    bound, anon = 0, []
+    anon, outside = [], []
     for e in entries:
         rel = e.col_y
         if rel in at:
             e.name = at[rel]
-            bound += 1
             if not e.name:
                 anon.append(e.order)
+        elif (tail := _pool_tail(names, name_offs, rel)) is not None:
+            e.name = tail
         else:
             e.name = ""
+            outside.append(e.order)
     app.entries = entries
-    if bound != len(entries):
-        app.problems.append(
-            f"entries with col_y outside the pool: "
-            f"{[e.order for e in entries if not any(e.col_y == o for o in name_offs)]}")
+    if outside:
+        app.problems.append(f"entries with col_y outside the pool: {outside}")
     meta = sorted({n for n in names
                    if n and n not in {e.name for e in entries}})
     if anon:

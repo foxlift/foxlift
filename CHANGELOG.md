@@ -3,6 +3,33 @@
 FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the version in
 `pyproject.toml`.
 
+## 0.9.2 — 2026-10-10
+
+More fixes from the same production application, each reproduced with authored
+programs compiled by VFP9 and fixed against those; none of that application's code is
+evidence or ships.
+
+- `extract` names APP and EXE members whose name VFP stored as the tail of an earlier
+  name. BUILD APP and BUILD EXE do not write a name twice: a name that ends a name
+  already in the pool points into it (`open.bmp` after `xopen.bmp`, and directory names
+  alike). 0.9.1 read a name only where a pool entry starts, so these members had no
+  name and were not extracted.
+- SQL SELECT keeps INTO ahead of WHERE when the source wrote it there and the WHERE
+  names the FROM table, a FROM alias or a projection column. The compiler stores INTO
+  behind WHERE either way, and the order survives only in how it numbers the INTO name
+  against the names the WHERE introduces; 0.9.1 counted those three as the WHERE's
+  own. INTO ARRAY is not covered.
+- Statements read for the first time: assignment to an array property of an array
+  element with bracket subscripts (`o.a[i, 4].b[j, 1] = v`); a method call, a macro
+  line or a complete nested DO CASE between DO CASE and its first CASE; `@ ... GET
+  m.var`; and REPLACE into a field qualified by a work-area letter (`REPLACE a.f WITH v`).
+- Measured figures are 0.9.0's. First corpus and the authored population: output
+  unchanged. Second corpus, development split: the SQL change rewrites 21 table records
+  in 21 files; read file by file on the live-record table path, those files stay at 746
+  of 750 equal sections, none gained or lost. Of the scored splits' APP and EXE files,
+  56 members in 9 containers that 0.9.1 left unnamed now have names, and no other name
+  changes. The sealed splits were not reopened.
+
 ## 0.9.1 — 2026-10-10
 
 Fixes found by running 0.9.0 on a production VFP9 application, its executables and
