@@ -3,6 +3,39 @@
 FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the version in
 `pyproject.toml`.
 
+## 0.9.1 — 2026-10-10
+
+Fixes found by running 0.9.0 on a production VFP9 application, its executables and
+its source archive. Each was reproduced with authored programs compiled by VFP9 and
+fixed against those; none of that application's code is evidence or ships.
+
+- `extract` opens an EXE built with a custom application icon. VFP9 writes the icon
+  file at the start of the EXE's overlay and the APP container after it, behind a
+  14-byte trailer whose last field is the distance to the container. FoxLift reads the
+  icon's own directory, checks it against that field, and refuses an overlay where the
+  two disagree.
+- REPLACE writes its scope words where the symbol table says they stood. VFP9 records
+  ALL before the field list, FOR before ALL and IN before FOR only in the order it
+  numbers symbols, so 0.9.0's spelling compiled to the same statement bytes with a
+  shifted symbol table. The recompiled program now matches, including a REPLACE ALL ...
+  FOR whose names earlier lines already declared. REPLACE ALL ... WHILE no longer loses
+  WHILE, and ADDITIVE ALL no longer loses ALL.
+- Statements read for the first time: TEXT without TO (NOSHOW, TEXTMERGE, PRETEXT,
+  FLAGS, ADDITIVE); RENAME with a parenthesised or single-quoted old name; EXPORT TO ...
+  XLS, XL5 or DIF without TYPE; ERASE with an unquoted name and RECYCLE; DELETE TRIGGER
+  ON ... FOR DELETE, INSERT or UPDATE; SET STRICTDATE TO; APPEND FROM ... XL5 or XLS
+  SHEET, and DELIMITED WITH a string without CHARACTER; @ ... GET ... VALID without
+  PICTURE; FOR EACH over an array element's property with bracket subscripts; ALEN of
+  an array element's array property; DIMENSION of an array property of an array
+  element; and an array element's property as a statement with paren subscripts.
+- Measured figures are 0.9.0's. First corpus: table path 29,595 of 29,597 and compiled
+  programs 1,051 of 1,051, output unchanged. Authored population unchanged. Second
+  corpus, development split: every section still lifts; the REPLACE changes rewrite 119
+  table records in 114 files and 8 programs. Read file by file on the live-record table
+  path, those files gain 118 equal sections and lose none, and 7 of the 8 programs now
+  recompile frame- and symbol-equal (the eighth fails the same way before and after).
+  The sealed splits were not reopened.
+
 ## 0.9.0 — 2026-10-10
 
 The wave-5 close: on the second corpus's development split every compiled

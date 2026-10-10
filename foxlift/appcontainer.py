@@ -97,8 +97,21 @@ def pe_raw_end(buf: bytes) -> int | None:
     return end
 
 
+ICON_TRAILER = 14
+"""r283-iconoverlay: bytes between an overlay's ICO file and its APP header."""
+
+
 def container_base(buf: bytes) -> int:
-    """Scan-free base: 0 for a plain .app (magic at 0), else PE overlay end.
+    """Scan-free base: 0 for a plain .app (magic at 0), else PE overlay end, past any icon.
+
+    r283-iconoverlay: an EXE built with an application icon starts its overlay with the
+    ICO file, then the APP header, measured on VFP 9 BUILD EXE output
+    (probes/oracle_harvest/round283_icon_overlay.json):
+        [overlay start][ICO: 6 + 16n directory + images, length L = max(offset+size)]
+        [10 bytes 00 83 49 00 00 00 00 00 00 00, not interpreted]
+        [u32 LE = L + 14][APP header at overlay start + L + 14]
+    The u32 is checked against L + 14 before the base is trusted. An EXE without an icon
+    keeps the header at the overlay start.
 
     Validated against the held-out single-program PE carrier where the derived value
     equals the magic-hit address 0x5e00 exactly (round 4)."""
@@ -107,7 +120,39 @@ def container_base(buf: bytes) -> int:
     end = pe_raw_end(buf)
     if end is None:
         raise ContainerError("not a plain APP container and not a PE wrapper")
-    return end
+    if buf[end:end + 4] == MAGIC:
+        return end
+    return _icon_overlay_base(buf, end)
+
+
+def _icon_overlay_base(buf: bytes, end: int) -> int:
+    """r283-iconoverlay: header base behind an ICO at the overlay start, else end.
+
+    An overlay that does not start with an ICO directory returns end unchanged, so load()
+    reports a missing header as before. An ICO whose trailer distance disagrees with its
+    own directory length is refused here, naming both numbers."""
+    if buf[end:end + 4] != b"\x00\x00\x01\x00":
+        return end
+    count = struct.unpack_from("<H", buf, end + 4)[0]
+    if count < 1 or end + 6 + 16 * count > len(buf):
+        return end
+    length = 0
+    for k in range(count):
+        size, off = struct.unpack_from("<II", buf, end + 6 + 16 * k + 8)
+        if size == 0 or off < 6 + 16 * count or off + size > len(buf) - end:
+            return end
+        length = max(length, off + size)
+    trailer = end + length
+    if trailer + ICON_TRAILER > len(buf):
+        raise ContainerError(
+            f"icon overlay at {end:#x}: ICO length {length} leaves no room for the "
+            f"{ICON_TRAILER}-byte trailer in {len(buf):#x} bytes")
+    distance = struct.unpack_from("<I", buf, trailer + 10)[0]
+    if distance != length + ICON_TRAILER:
+        raise ContainerError(
+            f"icon overlay at {end:#x}: trailer distance {distance} is not ICO length "
+            f"{length} + {ICON_TRAILER}")
+    return end + length + ICON_TRAILER
 
 
 def _read_names(buf: bytes, pool_start: int, pool_end: int):

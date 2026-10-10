@@ -617,7 +617,8 @@ class AtCommand:
     between the pair and SAY (letter-code `f8 03 <byte>`, SCHEME `4e`, RGB
     `42`, or a string). The GET bank wires in the one canonical order GET,
     DEFAULT 0e, FONT 40, STYLE 41, SIZE d3, RANGE c7. VALID is 0x2a behind
-    PICTURE. The final group's fd is reader-stripped as usual."""
+    the GET walk's PICTURE, or behind the GET bank when there is none. The
+    final group's fd is reader-stripped as usual."""
     row: object
     col: object
     corner: tuple | None = None     # (row2, col2) for the box form
@@ -802,13 +803,14 @@ class RenameStmt:
       expression new name  pidocchk.scx::CdSend stmts131/132 <-> L174/L175
         'RENAME 报表打印.frx TO ALLTRIM(keytxt)+m供应商+''.frx'''
           wire = 3d fb<len><old> 28 fc <new-name expr>
-    The old name is a string literal on every measured carrier; the new-name
+    The old name is a string literal or, since r284-renameparen, a grouped
+    expression (`fc <expr> [03] fd`, e.g. a parenthesised name). The new-name
     slot accepts ONE literal running exactly to end-of-statement OR ONE
     fc-wrapped expression consuming the whole remainder. Anything else —
-    truncated length fields, a missing 28 TO marker, trailing bytes, symbol
-    or bare-operand spellings in either slot — stays loudly Unsupported.
+    truncated length fields, a missing 28 TO marker, trailing bytes, or a bare
+    symbol in either slot — stays loudly Unsupported.
     Wire strings decode latin1 like every other literal payload."""
-    old_name: str         # literal filename str
+    old_name: object      # literal filename str, or the decoded operand AST node
     new_name: object      # literal filename str, or the decoded operand AST node
     # r276-renameq: both names were fc-grouped d9 literals. Bare names stay
     # unquoted; quoting them recompiles to this grouped frame instead.
@@ -909,6 +911,8 @@ class AppendFromStmt:
     # `delimited` still carries the DELIMITED WITH … tail, which only
     # DELIMITED takes.
     file_type: str = ""
+    # r286-appendtail: the SHEET name as rendered text (a bare name, or one grouped expression)
+    sheet: str | None = None
 
 
 @dataclass
@@ -1686,6 +1690,7 @@ class ReplaceStmt:
     additive: bool = False      # r107-replace: trailing ADDITIVE mark
     for_before_all: bool = False  # r273-fororder: the source wrote FOR before ALL
     in_before_for: bool = False   # r273-inorder: the source wrote IN before FOR
+    noopt_first: bool = False     # r282-replacescope: NOOPTIMIZE precedes the ALL it carries
 
 
 @dataclass
@@ -2530,21 +2535,83 @@ def _order_written_first(where_idxs, where_already, order_idxs, order_already,
     return max(order_new) < min(where_new)
 
 
-def _replace_all_first(syms, all_scope, in_spec, for_cond) -> bool:
-    """Did the source write REPLACE's ALL in front of its field list?
+def _replace_all_first(syms, all_scope, in_spec, for_cond, *, word="ALL",
+                       field_lo=None, cond_lo=None) -> bool:
+    """Did the source write REPLACE's scope word in front of its field list?
 
-    ALL is a symbol-table entry with no operand of its own, so its index is
-    where the word stood in the source. Measured for the plain shape only: an
-    IN clause or a trailing FOR gives the word a third possible position, so
-    those keep this flag false. The FOR-before-ALL order on `fd 03 13` is
-    `_replace_for_before_all` (r273-fororder), not this flag.
-    With neither clause present the statement's own symbols ARE the field
-    list's, which is why the statement-wide low-water answers it exactly.
+    The scope word is a symbol-table entry with no operand, so its index is
+    where the word stood in the source. Without a FOR clause the statement's
+    own symbols ARE the field list's, so the statement-wide low-water answers
+    it exactly, and an IN clause keeps this flag false.
+
+    With a FOR clause (r282-replacescope) the table keeps only the first word
+    written after the field list. Oracle round-282 matrix: `ALL fa WITH 1 FOR
+    fb` interns ALL, FA, FOR, FB; `fa WITH 1 ALL FOR fb` interns FA, ALL, FB;
+    `fa WITH 1 FOR fb ALL` interns FA, FOR, FB. So a new FOR above a new ALL
+    means ALL came first. `cond_lo` is the lowest new name the condition
+    introduced: a new FOR below it is this statement's, and with no such name
+    r281's one-slot margin decides. An old FOR gives no index, so ALL first
+    needs a new field above it: `field_lo`, the fields' low-water snapshotted
+    before the condition decodes.
     """
-    if not all_scope or in_spec is not None or for_cond is not None:
+    if not all_scope:
         return False
-    i = _table_new_index(syms, "ALL")
-    return i is not None and _SYM_STMT_LO is not None and i < _SYM_STMT_LO
+    if for_cond is None:
+        if in_spec is not None:
+            return False
+        i = _table_new_index(syms, word)
+        return i is not None and _SYM_STMT_LO is not None and i < _SYM_STMT_LO
+    i = _table_new_index(syms, word)
+    if i is None:
+        return False
+    f = _table_new_index(syms, "FOR")
+    if f is not None:
+        if cond_lo is not None:
+            counted = f < cond_lo
+        else:
+            slot = max(_SYM_TABLE_HI, _SYM_STMT_HI) + 1
+            # r285-replaceadjacent: with no new operand name, ALL-first interns
+            # ALL at the slot above the section's high-water and FOR at ALL+1
+            # (oracle round-285 `adj_program`, `sp_all_first`: FA FB ALL FOR X).
+            # A later statement may own that FOR (`cnt_repl_for_all`), and the
+            # ALL-first spelling still recompiles the same table. A name this
+            # statement introduces ahead of the ALL (`gate_fb_pre_mid_delfor`:
+            # FB FA ALL FOR X) is not this slot's, so field_lo keeps it out.
+            # REST shares the slot but is not measured for this arm
+            # (`rest_pre_first` keeps its text).
+            counted = f <= slot or (
+                word == "ALL" and field_lo is None and i == slot and f == slot + 1)
+        if counted:
+            return i < f
+    if not any(w in syms for w in ("FOR", "IN", "NOOPTIMIZE", "WHILE")):
+        return False
+    return field_lo is not None and i < field_lo
+
+
+def _replace_noopt_first(syms, nooptimize, all_scope, all_first) -> bool:
+    """r282-replacescope: NOOPTIMIZE is the first word after the field list.
+
+    Oracle c10_noopt_all_mid_for and c10_noopt_for_last: `fa WITH 1 NOOPTIMIZE
+    ALL FOR fb` and `fa WITH 1 NOOPTIMIZE FOR fb ALL` both intern NOOPTIMIZE
+    and no ALL, so the ALL the source wrote follows the NOOPTIMIZE word.
+    """
+    return bool(nooptimize and all_scope and not all_first
+                and _table_new_index(syms, "NOOPTIMIZE") is not None
+                and _table_new_index(syms, "ALL") is None)
+
+
+def _replace_tail(ast) -> str:
+    """The WHILE and IN clauses that close a REPLACE, in source order."""
+    text = ""
+    if getattr(ast, "while_cond", None) is not None:
+        text += " WHILE " + _emit(ast.while_cond)
+    spec = getattr(ast, "in_spec", None)
+    if spec is not None:
+        if isinstance(spec, tuple):
+            text += " IN (" + _emit(spec[1]) + ")"
+        else:
+            text += " IN " + str(spec)
+    return text
 
 
 def _keyword_once(syms, name) -> bool:
@@ -2557,56 +2624,68 @@ def _keyword_once(syms, name) -> bool:
 
 def _replace_for_before_all(syms, all_scope, for_cond, *,
                             nooptimize, additive, scope_word,
-                            while_cond, in_spec) -> bool:
-    """Did the source write FOR ahead of ALL on a plain REPLACE?
+                            while_cond) -> bool:
+    """Did the source write FOR ahead of ALL (or REST) on a REPLACE?
 
     Oracle r273-gap `rep_order`: `REPLACE f WITH e FOR c ALL` compiles to
     the same `fd 03 13` frame as `ALL FOR`, and the symbol table interns
     whichever scope word was written first. A later statement in the same
-    section reuses that FOR and still must not introduce ALL. NOOPTIMIZE,
-    ADDITIVE, REST/NEXT, WHILE and IN keep the canonical ALL-then-FOR order.
+    section reuses that FOR and still must not introduce ALL. NOOPTIMIZE and
+    ADDITIVE keep the canonical ALL-then-FOR order.
 
     r281-fororder: when an earlier statement already interned ALL, a FOR
     above every slot this statement and the earlier ones resolved, with a
     gap, was interned by a later statement, so this one wrote ALL first
     (YiFeiERP setpurtd: ALL reused, FOR eleven slots on).
+
+    r282-replacescope: WHILE and IN may follow the FOR (`FOR c ALL WHILE w`,
+    `FOR c ALL IN a`), and REST takes ALL's place (`FOR c REST`). Oracle
+    c8_all_for_while_last and c7_rest_after_for intern FOR and no scope word.
     """
-    if not all_scope or for_cond is None:
+    word = "ALL" if all_scope else ("REST" if scope_word == "REST" else None)
+    if word is None or for_cond is None:
         return False
-    if (nooptimize or additive or scope_word is not None
-            or while_cond is not None or in_spec is not None):
+    if nooptimize or additive or scope_word not in (None, "REST"):
         return False
     for_new = _table_new_index(syms, "FOR")
-    all_new = _table_new_index(syms, "ALL")
-    if for_new is not None and all_new is None:
-        if "ALL" not in syms:
+    word_new = _table_new_index(syms, word)
+    if for_new is not None and word_new is None:
+        if word not in syms:
             return True
         return for_new <= max(_SYM_TABLE_HI, _SYM_STMT_HI) + 1
-    if for_new is None and all_new is None:
-        return _keyword_once(syms, "FOR") and not _keyword_once(syms, "ALL")
+    if for_new is None and word_new is None:
+        return _keyword_once(syms, "FOR") and not _keyword_once(syms, word)
     return False
 
 
 def _replace_in_before_for(syms, for_cond, in_spec, *,
-                           all_scope, nooptimize, additive,
+                           all_scope, all_first,
+                           nooptimize, additive,
                            scope_word, while_cond) -> bool:
-    """Did the source write IN ahead of FOR on a plain REPLACE?
+    """Did the source write IN ahead of FOR on a REPLACE?
 
     Oracle r273-c2: `REPLACE f WITH e IN a FOR c` compiles to the
     `3e 16 … fd 13` frame and interns IN, not FOR. FOR-then-IN interns
-    FOR, at a different slot. ALL, NOOPTIMIZE, ADDITIVE, REST/NEXT,
-    WHILE and a parenthesised IN keep FOR then IN.
+    FOR, at a different slot. NOOPTIMIZE, ADDITIVE, REST/NEXT, WHILE and a
+    parenthesised IN keep FOR then IN. r282-replacescope: ALL may be spelled
+    too (`fa WITH 1 IN qt ALL FOR fb` interns IN and no ALL); the renderer
+    puts that ALL after the condition. An ALL written after the fields and
+    present in the table keeps the default spelling (`fa WITH 1 ALL FOR fb IN
+    qt` interns ALL alone, and an earlier statement's ALL gives the same
+    table with IN first); IN leads when the table lacks ALL or ALL stands
+    ahead of the fields.
     """
     if for_cond is None or in_spec is None or isinstance(in_spec, tuple):
         return False
-    if (all_scope or nooptimize or additive or scope_word is not None
-            or while_cond is not None):
+    if nooptimize or additive or scope_word is not None or while_cond is not None:
         return False
     in_new = _table_new_index(syms, "IN")
     for_new = _table_new_index(syms, "FOR")
     if in_new is not None and for_new is None:
         return True
     if in_new is None and for_new is None:
+        if all_scope and not all_first and "ALL" in syms:
+            return False
         return _keyword_once(syms, "IN") and not _keyword_once(syms, "FOR")
     return False
 
@@ -3249,10 +3328,15 @@ def _dec_expr_run(buf, i, end, syms, stack, stop_at_one=False,
                 # belong to the chain's link and not to the outer callee.
                 # Without it the stock pass reads both as the two-argument
                 # spelling and recompiles the first one into the second.
+                # r287-alenelemtail: an element link whose property read is the
+                # array-member token e0 (ALEN's first operand, oracle
+                # b_x_pa2 `43 43 00 <subs> f4 e5 e0 <prop> f8 01 01 cd`) takes
+                # the same args-before reading as the f7 tail.
                 if jk > i and jk + 6 <= end and buf[jk] == S.ARRAY_ELEM_CALL \
                         and (buf[jk + 3] == S.SYM
                              or (buf[jk + 3] in (S.NAME, S.MEMBER,
-                                                 S.ARRAY_ELEM_CALL)
+                                                 S.ARRAY_ELEM_CALL,
+                                                 S.ARRAY_MEMBER)
                                  and (_EXPR_RETRY_ACTIVE
                                       or packet & _PACKET_INSIDE_FIRST))):
                     recv = []
@@ -4559,18 +4643,23 @@ def _dec_array_elem_call(buf, i, end, syms):
             return out, t
 
     subs, t = _units(t)
-    if not subs or t >= end or buf[t] != 0x16:
+    if not subs or t >= end or buf[t] not in (0x16, S.PAREN):
         return None
+    bracket = buf[t] == 0x16
     t += 1
     hops = []
     while t + 3 <= end and buf[t] == S.MEMBER:
         hops.append(_sym(syms, S.u16(buf, t + 1)))
         t += 3
+    # r287-stmtelemparen: the property tail of a bare element statement takes
+    # either closer, and the node records which one the source wrote (oracle
+    # d_stmt_pa `99 e5 <arr> fc <sub> fd 03 f7 <prop>` against d_stmt_br's
+    # `fd 16 f7 <prop>`). The method callee keeps the bracket spelling only.
     if t + 3 == end and buf[t] == S.SYM:
         term = _sym(syms, S.u16(buf, t + 1))
-        return IndexedElemRef(name, subs, prop=term, bracket=True,
+        return IndexedElemRef(name, subs, prop=term, bracket=bracket,
                               hops=tuple(hops))
-    if t + 4 > end or buf[t] != S.NAME:
+    if not bracket or t + 4 > end or buf[t] != S.NAME:
         return None
     method = _sym(syms, S.u16(buf, t + 1))
     args, t = _units(t + 3)
@@ -4682,6 +4771,46 @@ def _typed_extension(name, buf, t, end, syms, what):
         elif t != end:
             raise Unsupported("%s OF library unresolved" % what)
     return (name, typ, _as_class_name(lib_marker, lib)), t
+
+
+def _dec_dim_element_declarator(buf, t, end, syms):
+    """A declarator whose array is a property of an element (r287-dimelemdecl):
+
+        f4 <obj> [f4 <hop>]* e5 <arr> <subs> <closer> f6 <name> <dims> <closer>
+
+    Oracle c_br2_br2 `DIMENSION loObj.aArr[lnI, 4].aList[RECCOUNT(lcAlias), 6]`
+    is `15 f4 0000 e5 0100 fc f7 0200 fd 07 fc f8 0104 fd 16 f6 0300 fc 43 f7
+    0400 4e fd 07 fc f8 0106 fd 16`. The element's own subscript list and the
+    declarator's dimension list each record their closer (03 paren, 16
+    bracket). c_pa2_pa2, c_br2_pa2, c_pa2_br2 and c_br1_br1 measure the
+    closers as independent of each other. The element is rendered into the
+    name, the way the element chain prefixes its base, and the declarator is
+    an ArrayRef so the DIMENSION arm reads it like any other declarator.
+
+    Returns (ArrayRef, next_index) or None, which keeps every other
+    declarator on the lvalue reader.
+    """
+    k = t
+    hops = []
+    while k + 3 <= end and buf[k] == S.MEMBER:
+        hops.append(_sym(syms, S.u16(buf, k + 1)))
+        k += 3
+    if not hops or k + 4 > end or buf[k] != S.ARRAY_ELEM_CALL \
+            or buf[k + 3] != S.FC:
+        return None
+    arr = _sym(syms, S.u16(buf, k + 1))
+    try:
+        subs, elem_bracket, k = _dec_dim_dims(buf, k + 3, end, syms)
+        if k + 3 > end or buf[k] != S.NAME:
+            return None
+        name = _sym(syms, S.u16(buf, k + 1))
+        dims, bracket, k = _dec_dim_dims(buf, k + 3, end, syms)
+    except Unsupported:
+        return None
+    o, c = ("[", "]") if elem_bracket else ("(", ")")
+    element = "%s%s%s%s" % (arr, o, ", ".join(_emit(x) for x in subs), c)
+    head = ".".join(hops + [element, name])
+    return ArrayRef(head, dims, bracket=bracket), k
 
 
 def _dim_as_type(buf, t, end):
@@ -5906,9 +6035,10 @@ def _dec_args_first_call(buf, j, end, syms, stack, recv):
                 ObjectChain(list(recv), [(name, args)],
                             [_sym(syms, x) for x in ids]), k + 3)
     prop = None
-    if j + 3 <= end and buf[j] == S.SYM:
+    if j + 3 <= end and buf[j] in (S.SYM, S.ARRAY_MEMBER):
         # measured continuation one: ONE terminal property read (s2 `.BAR`,
-        # w1 `.NAME`, w2 `.CNTPREVIEWER`, r3a `.INNERHTML`)
+        # w1 `.NAME`, w2 `.CNTPREVIEWER`, r3a `.INNERHTML`); r287-alenelemtail
+        # adds the e0 array-member read, the same member id in the same slot
         prop = _sym(syms, S.u16(buf, j + 1))
         j += 3
     elif not (j + 3 <= end and buf[j] == S.NAME):
@@ -11627,8 +11757,9 @@ def _dec_foreach_element(buf, t, end, syms):
       f4-run e5 <s>       o.Items(i).Sub   MidCall, one f7 property tail
       f5 0d e5 <s>        m.a(1).Sub       MidCall, m.-rooted
       e2 f6 <s>           .Items(i)        MethodCall, recv_with
-    every link with leaf subscripts + 03. A bare e5 (no f7 tail), a hop
-    behind WITH, or a second property hop stays refused."""
+    every link with leaf subscripts + 03, and the e5 MidCall also + 16
+    (r287-foreachbracket). A bare e5 (no f7 tail), a hop behind WITH, or a
+    second property hop stays refused."""
     k = t
     memvar = with_root = False
     if k + 5 <= end and buf[k] == S.WORKAREA_REF and buf[k + 1] == 0x0D:
@@ -11654,8 +11785,15 @@ def _dec_foreach_element(buf, t, end, syms):
     elem = buf[k]
     name = _sym(syms, S.u16(buf, k + 1))
     subs, k = _dec_foreach_subscripts(buf, k + 3, end, syms)
-    if k >= end or buf[k] != S.PAREN:
+    # r287-foreachbracket: an element link's subscript list closes on the 16
+    # bracket marker as well as 03 (oracle a_br2_prop, a_br1_prop: the e5 is
+    # followed by `fc .. fd 07 fc .. fd 16 f7 <prop>`), and the MidCall
+    # records that spelling. The named f6 form has no measured 16 closer and
+    # keeps requiring 03.
+    if k >= end or not (buf[k] == S.PAREN or (
+            buf[k] == 0x16 and elem == S.ARRAY_ELEM_CALL)):
         raise Unsupported("FOR EACH collection form")
+    bracket = buf[k] == 0x16
     k += 1
     if elem == S.NAME:
         if not hops and not memvar:
@@ -11675,7 +11813,7 @@ def _dec_foreach_element(buf, t, end, syms):
         recv = ["m." + hops[0]] + hops[1:]
     else:
         recv = hops
-    return MidCall(recv, name, subs, prop), k + 3
+    return MidCall(recv, name, subs, prop, bracket=bracket), k + 3
 
 
 def _dec_foreach_grouped(buf, t, end, syms):
@@ -11787,6 +11925,47 @@ def dec_statement(buf, syms):
             _SYM_TABLE_HI = _SYM_STMT_HI
 
 
+_TEXT_FLAG_MARKS = (S.TEXT_FLAG_TEXTMERGE, S.TEXT_FLAG_NOSHOW, S.TEXT_FLAG_ADDITIVE,
+                    S.TEXT_FLAG_PRETEXT, S.TEXT_FLAG_FLAGS)
+
+
+def _text_flags(buf, t, end, syms):
+    """The clause flags of a TEXT opener, from offset t to the statement end.
+
+    The three plain flags, each at most once and only in the wire order; then the
+    two expression clauses, PRETEXT ahead of FLAGS. A repeat, a reorder, or an
+    unknown mark leaves a byte the trailing check rejects, so the arm is no more
+    permissive than the bytes the oracle produces.
+    """
+    flags = []
+    for mark, word in ((S.TEXT_FLAG_TEXTMERGE, "TEXTMERGE"),
+                       (S.TEXT_FLAG_NOSHOW, "NOSHOW"),
+                       (S.TEXT_FLAG_ADDITIVE, "ADDITIVE")):
+        if t < end and buf[t] == mark:
+            flags.append(word)
+            t += 1
+    for mark, word in ((S.TEXT_FLAG_PRETEXT, "PRETEXT"),
+                       (S.TEXT_FLAG_FLAGS, "FLAGS")):
+        if t < end and buf[t] == mark:
+            if t + 1 >= end or buf[t + 1] != S.FC:
+                raise Unsupported("TEXT %s argument shape" % word)
+            expr, t = _fc_group(buf, t + 1, end, syms)
+            flags.append("%s %s" % (word, _emit(expr)))
+    if t != end:
+        raise Unsupported(
+            "TEXT clause flag 0x%02x unmeasured" % buf[t])
+    return flags
+
+
+def _rename_grouped_end(buf, j, end):
+    """Index of the fd closing a grouped d9 old name `fc d9 <len> <name> fd` that
+    starts at j, or None when the group does not close there (r276-renameq)."""
+    if j + 4 > end or buf[j] != S.FC or buf[j + 1] != S.STR2:
+        return None
+    t = j + 4 + S.u16(buf, j + 2)
+    return t if t < end and buf[t] == S.FD else None
+
+
 def _dec_statement(buf, syms):
     end = len(buf)
     lead = buf[0]
@@ -11848,13 +12027,14 @@ def _dec_statement(buf, syms):
             # only behind SAY or GET, exactly the oracle-confirmed hosts.
             picture, j = _fc_group(buf, j + 1, end, syms)
         valid = None
-        if get is not None and picture is not None \
-                and j < end and buf[j] == S.AT_VALID_MARK:
-            # r239-atvalid: VALID <expr> is 2a plus one fc group, and only
-            # behind PICTURE. The carrier spends a no-arg call and a
-            # comparison there. WHEN d2, ERROR 10 and MESSAGE 1d follow
-            # it on the wire and stay unmeasured; a 2a with no PICTURE
-            # host stays unmeasured too.
+        if get is not None and j < end and buf[j] == S.AT_VALID_MARK:
+            # r239-atvalid: VALID <expr> is 2a plus one fc group behind the
+            # GET bank. The carrier spends a no-arg call and a comparison
+            # there. WHEN d2, ERROR 10 and MESSAGE 1d follow it on the wire
+            # and stay unmeasured.
+            # r286-atvalidnopic: PICTURE is not required. The oracle wires
+            # `c1 <get> 2a fc ...` with no PICTURE, and `c4 <say> c1 <get>
+            # 2a fc ...` with a SAY group ahead of the GET bank.
             valid, j = _fc_group(buf, j + 1, end, syms)
         if j != end:
             raise Unsupported("@ clause 0x%02x unmeasured" % buf[j])
@@ -12771,7 +12951,11 @@ def _dec_statement(buf, syms):
         items = []
         t = j
         while True:
-            lv, t2 = _dec_lvalue(buf, t, end, syms)
+            elem_decl = _dec_dim_element_declarator(buf, t, end, syms)
+            if elem_decl is not None:
+                lv, t2 = elem_decl
+            else:
+                lv, t2 = _dec_lvalue(buf, t, end, syms)
             if isinstance(lv, ArrayRef):
                 # r150-dimas: the carrier takes this branch — _dec_lvalue
                 # already consumed the declarator's own closer, so t2 is the
@@ -12861,6 +13045,11 @@ def _dec_statement(buf, syms):
         # clause follows and reader-stripped when statement-final.
         if end == 1:
             return TextStmt(None, [])
+        # r284-textnoshow: the flag marks stand in front of TO too. The oracle compiles
+        # `TEXT NOSHOW`, `TEXT TEXTMERGE NOSHOW`, `TEXT PRETEXT n`, `TEXT FLAGS n` and
+        # `TEXT ADDITIVE` with no TO variable, each as `4d` followed by the flag bytes.
+        if end >= 2 and buf[1] in _TEXT_FLAG_MARKS:
+            return TextStmt(None, _text_flags(buf, 1, end, syms))
         if end < 2 or buf[1] != S.TO_MARK:
             raise Unsupported("TEXT TO frame shape")
         t = 2
@@ -12889,28 +13078,7 @@ def _dec_statement(buf, syms):
                 else MemberRef(names[0])
         else:
             raise Unsupported("TEXT TO target form")
-        # The three plain flags, each at most once and only in the wire order;
-        # then the two expression clauses, PRETEXT ahead of FLAGS. A repeat, a
-        # reorder, or an unknown mark leaves a byte the trailing check rejects,
-        # so the arm is no more permissive than the bytes the oracle produces.
-        flags = []
-        for mark, word in ((S.TEXT_FLAG_TEXTMERGE, "TEXTMERGE"),
-                           (S.TEXT_FLAG_NOSHOW, "NOSHOW"),
-                           (S.TEXT_FLAG_ADDITIVE, "ADDITIVE")):
-            if t < end and buf[t] == mark:
-                flags.append(word)
-                t += 1
-        for mark, word in ((S.TEXT_FLAG_PRETEXT, "PRETEXT"),
-                           (S.TEXT_FLAG_FLAGS, "FLAGS")):
-            if t < end and buf[t] == mark:
-                if t + 1 >= end or buf[t + 1] != S.FC:
-                    raise Unsupported("TEXT %s argument shape" % word)
-                expr, t = _fc_group(buf, t + 1, end, syms)
-                flags.append("%s %s" % (word, _emit(expr)))
-        if t != end:
-            raise Unsupported(
-                "TEXT clause flag 0x%02x unmeasured" % buf[t])
-        return TextStmt(target, flags)
+        return TextStmt(target, _text_flags(buf, t, end, syms))
     if lead == S.IF_LEAD:
         # 25 fc <cond> fd f9 05 <u16 rel-target> — the fd survives here because the u16
         # follows it before the statement's fe, so the reader strips only the fe.
@@ -15212,14 +15380,45 @@ def _dec_statement(buf, syms):
                     else:
                         raise Unsupported(
                             "APPEND trailing bytes (variants unforced)")
+                # r286-appendtail: `d1 fb <str>` is WITH <str> with no CHARACTER word.
+                # Oracle: WITH ,  WITH ","  and  WITH ','  all wire fb 01 00 2c.
+                elif file_type == "DELIMITED" and j + 1 < end \
+                        and buf[j] == 0xD1 and buf[j + 1] == S.STR:
+                    delim_char, j = _dec_str_arg(buf, j + 1, end)
+                    delimited = ("DELIMITER", delim_char)
             elif type_word:
                 raise Unsupported("APPEND TYPE without a file type")
+            # r286-appendtail: SHEET <name> behind the file operand, with no type word or
+            # with XL5 or XLS. The name takes the FROM operand's spellings: a bare fb name
+            # (unquoted), or one fc group ((lcSheet), "Sheet1", ALLTRIM(...)).
+            sheet = None
+            if j < end and buf[j] == S.APPEND_SHEET_MARK \
+                    and file_type in ("", "XL5", "XLS"):
+                j += 1
+                try:
+                    if j < end and buf[j] == S.STR:
+                        sheet, j = _dec_str_arg(buf, j, end)
+                    elif j < end and buf[j] == S.FC:
+                        se, k = _dec_expr(buf, j + 1, end, syms,
+                                          stop_bytes=_IF_COND_STOP)
+                        if len(se) != 1:
+                            raise Unsupported("APPEND SHEET unresolved")
+                        if k < end and buf[k] == S.PAREN:
+                            k += 1
+                        if k < end and buf[k] == S.FD:
+                            k += 1
+                        sheet, j = _emit(se[0]), k
+                    else:
+                        raise Unsupported("APPEND SHEET unresolved")
+                except Unsupported:
+                    raise Unsupported("APPEND trailing bytes (variants unforced)")
             if j != end:
                 raise Unsupported("APPEND trailing bytes (variants unforced)")
             return AppendFromStmt(es[0], cond=cond, fields=fields,
                                   delimited=delimited, bare_name=bare_name,
                                   to_array=to_array,
-                                  type_word=type_word, file_type=file_type)
+                                  type_word=type_word, file_type=file_type,
+                                  sheet=sheet)
         raise Unsupported("APPEND trailing bytes (variants unforced)")
     if lead == S.NODEFAULT_LEAD:
         if end != 1:
@@ -17112,9 +17311,12 @@ def _dec_statement(buf, syms):
                 additive = True
                 k += 1
                 if k == end:
+                    # r282-replacescope: a trailing 03 behind ADDITIVE is the
+                    # ALL the stripped scope byte carries (`fd 01 03`)
+                    scope = all_scope or strip_all
                     return ReplaceStmt(
-                        pairs, all_scope=all_scope, in_spec=in_spec,
-                        all_first=_replace_all_first(syms, all_scope, in_spec,
+                        pairs, all_scope=scope, in_spec=in_spec,
+                        all_first=_replace_all_first(syms, scope, in_spec,
                                                      None),
                         while_cond=while_cond, scope_word=scope_word,
                         scope_count=scope_count, additive=additive,
@@ -17124,7 +17326,10 @@ def _dec_statement(buf, syms):
                 continue
             if buf[k] == 0x13 and k + 1 < end and buf[k + 1] == S.FC:
                 # trailing FOR clause: 13 fc <cond> [fd] (mainmenu Command5 aligned)
-                fes, fk = _dec_expr(buf, k + 2, end, syms, stop_bytes=_IF_COND_STOP)
+                field_lo = _SYM_STMT_LO       # r282: the fields' low-water, before the condition
+                with _sym_tap() as cond_tap:
+                    fes, fk = _dec_expr(buf, k + 2, end, syms, stop_bytes=_IF_COND_STOP)
+                cond_lo = cond_tap.first_new()
                 if len(fes) != 1:
                     raise Unsupported("REPLACE FOR clause unresolved")
                 if fk < end and buf[fk] == S.FD:
@@ -17162,19 +17367,27 @@ def _dec_statement(buf, syms):
                                        additive=additive,
                                        nooptimize=nooptimize)
                 scope = all_scope or strip_all
+                all_first = _replace_all_first(
+                    syms, scope, in_spec, fes[0], field_lo=field_lo,
+                    cond_lo=cond_lo) or _replace_all_first(
+                    syms, scope_word == "REST", in_spec, fes[0], word="REST",
+                    field_lo=field_lo, cond_lo=cond_lo)
                 return ReplaceStmt(
                     pairs, all_scope=scope, for_cond=fes[0], in_spec=in_spec,
                     while_cond=while_cond, scope_word=scope_word,
                     scope_count=scope_count, additive=additive,
-                    nooptimize=nooptimize,
+                    nooptimize=nooptimize, all_first=all_first,
                     for_before_all=_replace_for_before_all(
                         syms, scope, fes[0], nooptimize=nooptimize,
                         additive=additive, scope_word=scope_word,
-                        while_cond=while_cond, in_spec=in_spec),
+                        while_cond=while_cond),
                     in_before_for=_replace_in_before_for(
                         syms, fes[0], in_spec, all_scope=scope,
-                        nooptimize=nooptimize, additive=additive,
-                        scope_word=scope_word, while_cond=while_cond))
+                        all_first=all_first, nooptimize=nooptimize,
+                        additive=additive, scope_word=scope_word,
+                        while_cond=while_cond),
+                    noopt_first=_replace_noopt_first(
+                        syms, nooptimize, scope, all_first))
             if buf[k] == 0x2B and k + 1 < end and buf[k + 1] == S.FC:
                 # r107-replace: bare trailing WHILE clause
                 # ('REPLACE f WITH 1 WHILE c', measured).
@@ -17749,6 +17962,27 @@ def _dec_statement(buf, syms):
         if end == 1:
             return ("DELETE",)
         t = 1
+        # r286-deltrigger: DELETE TRIGGER ON <table> FOR <event>. The table is a bare
+        # fb name (stored unquoted) or one fc group ("qt" is fc d9, 'qt' is fc fb,
+        # (lcTable) is fc f7 .. 03); the event byte is DELETE cd, INSERT d6 or UPDATE ce.
+        if t < end and buf[t] == S.DELETE_TRIGGER_MARK:
+            t += 1
+            if t >= end or buf[t] != S.ON_MARK:
+                raise Unsupported("DELETE trailing bytes")
+            t += 1
+            try:
+                if t < end and buf[t] == S.STR:
+                    table, t = _dec_str_arg(buf, t, end)
+                else:
+                    node, t = _fc_group(buf, t, end, syms)
+                    table = _emit(node)
+            except Unsupported:
+                raise Unsupported("DELETE trailing bytes")
+            if t + 2 == end and buf[t] == S.FOR_MARK \
+                    and buf[t + 1] in S.TRIGGER_EVENT_WORDS:
+                return CommandLine("DELETE TRIGGER ON %s FOR %s"
+                                   % (table, S.TRIGGER_EVENT_WORDS[buf[t + 1]]))
+            raise Unsupported("DELETE trailing bytes")
         if t < end and buf[t] == S.COPY_FILE_MARK:
             t += 1
             if t < end and buf[t] in (S.STR, S.STR2):
@@ -17879,11 +18113,16 @@ def _dec_statement(buf, syms):
         # 1. Literal name: lead 20 + fb string, then end of statement. Bound by the
         #    command sweep's authored 'ERASE ers1.txt' -> `20 fb 08 'ers1.txt'`
         #    (CMD_SWEEP.md bound-commands table). Trailing bytes stay unsupported.
+        # r284-eraseunquoted: an unquoted name takes the RECYCLE keyword as one more
+        # byte, `20 fb <len> <name> c4`. The oracle compiles `ERASE x.tmp RECYCLE` and
+        # `ERASE lcFile RECYCLE` that way; a quoted name rides the file-expression form.
         if end >= 4 and buf[j] == S.STR:
             n = S.u16(buf, j + 1)
-            if j + 3 + n != end:
-                raise Unsupported("ERASE trailing bytes")
-            return EraseStmt(_payload_text(buf[j + 3:j + 3 + n]))
+            if j + 3 + n == end:
+                return EraseStmt(_payload_text(buf[j + 3:j + 3 + n]))
+            if j + 4 + n == end and buf[j + 3 + n] == S.REMOVE_TABLE_RECYCLE:
+                return EraseStmt(_payload_text(buf[j + 3:j + 3 + n]), True)
+            raise Unsupported("ERASE trailing bytes")
         # 2. File EXPRESSION: `20 fc <rpn> [fd c4]`, corpus-forced across 31 dev
         #    methods / 51 statements with every distinct stream shape aligned to its
         #    own stored METHODS source (pop-erase lane audit):
@@ -17946,11 +18185,12 @@ def _dec_statement(buf, syms):
         #      wire expr = fc 43 f7<KEYTXT> 9b f7<供应商> 06 fb '.frx' 06
         #    ONE value consuming the whole remainder, else reject.
         #
-        # The old name is a string literal on every measured carrier (fb on
-        # both; d9 shares the literal envelope like SQL FROM/CURSOR names).
-        # Context stays local: 28 binds as TO only immediately after the old
-        # name under lead 3d, never globally. Truncated length fields, a
-        # missing TO, trailing bytes and symbol/bare-operand spellings stay
+        # The old name was a string literal on every carrier measured in r34 (fb on
+        # both; d9 shares the literal envelope like SQL FROM/CURSOR names);
+        # r284-renameparen adds grouped expressions. Context stays local: 28 binds
+        # as TO only immediately after the old name under lead 3d, never globally.
+        # Truncated length fields, a missing TO, trailing bytes and symbol/bare-operand
+        # spellings stay
         # loudly Unsupported — the simulation envelope
         # (/tmp/foxlift-r34-census scripts/lane_sims34.py sim_B_rename) is the
         # whole acceptance boundary, and the whole-population diff proved it
@@ -17981,17 +18221,13 @@ def _dec_statement(buf, syms):
                 raise Unsupported("RENAME CLASS trailing bytes")
             return RenameClassStmt(name, library, new)
         # r276-renameq: grouped d9 old name, its fd, TO, grouped d9 new name
-        # to end. `3d fc d9 <old> fd 28 fc d9 <new>`. Single quotes (fc fb),
-        # a parenthesised name and an expression new name stay refused.
-        if j + 1 < end and buf[j] == S.FC and buf[j + 1] == S.STR2:
-            n_old = S.u16(buf, j + 2)
-            if j + 4 + n_old >= end:
-                raise Unsupported("RENAME old-name literal missing")
-            old = _payload_text(buf[j + 4:j + 4 + n_old])
-            t = j + 4 + n_old
-            if buf[t] != S.FD:
-                raise Unsupported("RENAME old-name literal missing")
-            t += 1
+        # to end. `3d fc d9 <old> fd 28 fc d9 <new>`. An expression new name
+        # stays refused. Grouped old names that do not close at fd (a
+        # parenthesised name, single quotes) lift under r284-renameparen below.
+        grouped_end = _rename_grouped_end(buf, j, end)
+        if grouped_end is not None:
+            old = _payload_text(buf[j + 4:grouped_end])
+            t = grouped_end + 1
             if t >= end or buf[t] != S.TO_MARK:
                 raise Unsupported("statement lead 0x3d missing TO")
             t += 1
@@ -18007,13 +18243,24 @@ def _dec_statement(buf, syms):
             if t != end:
                 raise Unsupported("statement lead 0x3d trailing bytes")
             return RenameStmt(old, new, True)
-        if j + 3 > end or buf[j] not in (S.STR, S.STR2):
-            raise Unsupported("RENAME old-name literal missing")
-        n_old = S.u16(buf, j + 1)
-        if j + 3 + n_old > end:
-            raise Unsupported("RENAME old-name string truncated")
-        old = _payload_text(buf[j + 3:j + 3 + n_old])
-        t = j + 3 + n_old
+        # r284-renameparen: a grouped old name rides `fc <expr> [03] fd`, the same group
+        # every other expression operand uses. The oracle compiles
+        # `RENAME (lcOld) TO (lcNew)`, `RENAME (lcDir + "x.dbf") TO ...`,
+        # `RENAME ("x.dbf") TO ...` and `RENAME 'x.dbf' TO ...` with it, and their
+        # new-name forms already lift.
+        if j + 1 < end and buf[j] == S.FC:
+            try:
+                old, t = _fc_group(buf, j, end, syms)
+            except Unsupported:
+                raise Unsupported("RENAME old-name literal missing")
+        else:
+            if j + 3 > end or buf[j] not in (S.STR, S.STR2):
+                raise Unsupported("RENAME old-name literal missing")
+            n_old = S.u16(buf, j + 1)
+            if j + 3 + n_old > end:
+                raise Unsupported("RENAME old-name string truncated")
+            old = _payload_text(buf[j + 3:j + 3 + n_old])
+            t = j + 3 + n_old
         if t >= end or buf[t] != S.TO_MARK:
             raise Unsupported("statement lead 0x3d missing TO")
         t += 1
@@ -19104,14 +19351,23 @@ def _dec_statement(buf, syms):
                         t += 1
                         continue
                     break
+            # r284-exportnotype: the oracle compiles `EXPORT TO <file> XLS`, `XL5` and
+            # `DIF` with the TYPE keyword left out (`56 28 <file> [fd] c7|bb|bf`); the
+            # keyword is not in the wire, so the line is written without it.
+            word, keyword = None, " TYPE "
             if (t + 1 < end and buf[t] == S.TYPE_WORD_MARK
                     and buf[t + 1] in S.EXPORT_TYPE_WORDS):
                 word = S.EXPORT_TYPE_WORDS[buf[t + 1]]
                 t += 2
+            elif t < end and buf[t] in S.EXPORT_BARE_TYPE_WORDS:
+                word = S.EXPORT_BARE_TYPE_WORDS[buf[t]]
+                t += 1
+                keyword = " "
+            if word is not None:
                 line = "EXPORT TO " + name
                 if fields:
                     line += " FIELDS " + ", ".join(fields)
-                line += " TYPE " + word
+                line += keyword + word
                 # r254-exfor: the carriers store FOR as the last clause,
                 # `d4 <word> 13 fc <cond>` with the group's fd stripped.
                 # FIELDS plus FOR, and any tail after FOR, stay refused.
@@ -21643,7 +21899,9 @@ def _emit_line(ast):
             return "RENAME %s TO %s" % (
                 _emit_vfp_string(ast.old_name, True),
                 _emit_vfp_string(ast.new_name, True))
-        return "RENAME %s TO %s" % (ast.old_name, new)
+        old = ast.old_name if isinstance(ast.old_name, str) \
+            else _emit(ast.old_name)
+        return "RENAME %s TO %s" % (old, new)
     if isinstance(ast, RenameClassStmt):
         out = "RENAME CLASS %s" % ast.name
         if ast.library is not None:
@@ -21753,12 +22011,9 @@ def _emit_line(ast):
     if isinstance(ast, TextStmt):
         # flags already hold the canonical wire order (round-23 t6: the compiler
         # normalises scrambled source order, so canonical emission is safe)
-        if ast.target is None:
-            head = "TEXT"
-        else:
-            head = "TEXT TO " + _emit(ast.target)
-            for fl in ast.flags:
-                head += " " + fl
+        head = "TEXT" if ast.target is None else "TEXT TO " + _emit(ast.target)
+        for fl in ast.flags:
+            head += " " + fl
         lines = [head]
         lines += [ln.text for ln in ast.body]
         lines.append("ENDTEXT")
@@ -21787,52 +22042,58 @@ def _emit_line(ast):
     if isinstance(ast, ReplaceStmt):
         body = ", ".join("%s WITH %s" % (_emit(lv), _emit(e))
                          for lv, e in ast.pairs)
-        # r49-clauseorder: ALL rides the same byte wherever the source put the
-        # word, and the symbol table is what says where that was
-        if ast.all_scope and getattr(ast, "all_first", False) \
-                and not getattr(ast, "nooptimize", False):
-            return "REPLACE ALL " + body
-        if (ast.all_scope and ast.for_cond is not None
-                and getattr(ast, "for_before_all", False)):
+        # r49-clauseorder / r282-replacescope: a scope word the table places
+        # ahead of the field list is printed there. The clauses after the
+        # fields keep their order; the one the table says was written first
+        # is the one the emission spells first.
+        ahead = ""
+        if getattr(ast, "all_first", False):
+            ahead = "ALL" if ast.all_scope else "REST"
+        text = "REPLACE " + (ahead + " " if ahead else "") + body
+        all_after = bool(ast.all_scope) and ahead != "ALL"
+        scope_after = getattr(ast, "scope_word", None) is not None \
+            and ahead != "REST"
+        if ast.for_cond is not None and getattr(ast, "for_before_all", False):
             # r273-fororder: the frame cannot say which word came first.
             # The table can: it interns that word and not the other.
-            return ("REPLACE " + body + " FOR " + _emit(ast.for_cond)
-                    + " ALL")
-        text = "REPLACE " + body
-        if ast.all_scope:
-            text += " ALL"
-        if getattr(ast, "nooptimize", False):
-            # r223-replacenoopt: the wire stores 0x30 first whatever
-            # position the source wrote it in. The emission spells it
-            # after an ALL scope word (the carrier's table interns ALL,
-            # the first clause word in source order) and ahead of every
-            # other clause; other scope words keep the NOOPTIMIZE-first
-            # canonical order.
-            text += " NOOPTIMIZE"
-        if getattr(ast, "additive", False):
-            text += " ADDITIVE"
-        if getattr(ast, "scope_word", None) is not None:
-            text += " " + ast.scope_word
-            if getattr(ast, "scope_count", None) is not None:
-                text += " " + _emit(ast.scope_count)
-        if (ast.for_cond is not None
-                and getattr(ast, "in_before_for", False)):
+            text += " FOR " + _emit(ast.for_cond)
+            if all_after:
+                text += " ALL"
+            if scope_after:
+                text += " " + ast.scope_word
+            return text + _replace_tail(ast)
+        if ast.for_cond is not None and getattr(ast, "in_before_for", False):
             # r273-inorder: the frame cannot say which clause word came
             # first. The table can: it interns that word and not the other.
             text += " IN " + str(ast.in_spec)
             text += " FOR " + _emit(ast.for_cond)
+            if all_after:
+                text += " ALL"
             return text
+        if getattr(ast, "noopt_first", False):
+            # r282-replacescope: NOOPTIMIZE is the word the table interned,
+            # so it stands ahead of the ALL the source also wrote
+            text += " NOOPTIMIZE" + (" ALL" if all_after else "")
+        else:
+            if all_after:
+                text += " ALL"
+            if getattr(ast, "nooptimize", False):
+                # r223-replacenoopt: the wire stores 0x30 first whatever
+                # position the source wrote it in. The emission spells it
+                # after an ALL scope word (the carrier's table interns ALL,
+                # the first clause word in source order) and ahead of every
+                # other clause; other scope words keep the NOOPTIMIZE-first
+                # canonical order.
+                text += " NOOPTIMIZE"
+        if getattr(ast, "additive", False):
+            text += " ADDITIVE"
+        if scope_after:
+            text += " " + ast.scope_word
+            if getattr(ast, "scope_count", None) is not None:
+                text += " " + _emit(ast.scope_count)
         if ast.for_cond is not None:
             text += " FOR " + _emit(ast.for_cond)
-        if getattr(ast, "while_cond", None) is not None:
-            text += " WHILE " + _emit(ast.while_cond)
-        if getattr(ast, "in_spec", None) is not None:
-            spec = ast.in_spec
-            if isinstance(spec, tuple):
-                text += " IN (" + _emit(spec[1]) + ")"
-            else:
-                text += " IN " + str(spec)
-        return text
+        return text + _replace_tail(ast)
     if isinstance(ast, PublicStmt):
         return ("PRIVATE " if getattr(ast, "private", False) else "PUBLIC ") \
             + ", ".join(_fmt_param(n) if isinstance(n, tuple)
@@ -22450,8 +22711,14 @@ def _emit_line(ast):
                 out += " TYPE"          # r47-typeword: d4 is the TYPE keyword
             out += " " + ast.file_type
             if ast.delimited is not None:
-                out += (" WITH TAB" if ast.delimited[0] == "TAB"
-                        else " WITH CHARACTER '%s'" % ast.delimited[1])
+                if ast.delimited[0] == "TAB":
+                    out += " WITH TAB"
+                elif ast.delimited[0] == "DELIMITER":
+                    out += " WITH '%s'" % ast.delimited[1]   # r286-appendtail: no CHARACTER word
+                else:
+                    out += " WITH CHARACTER '%s'" % ast.delimited[1]
+        if ast.sheet is not None:
+            out += " SHEET " + ast.sheet                     # r286-appendtail
         return out
     if isinstance(ast, AppendGeneralStmt):
         out = "APPEND GENERAL %s" % ast.field_name

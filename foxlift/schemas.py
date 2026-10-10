@@ -382,6 +382,10 @@ ACTIVATE_WIN_SAME = 0xCF  # 74 2c cf <name> = ACTIVATE WINDOW <name> SAME (f21);
 # is a compiler diagnostic, not this slot.
 FILE_TYPE_WORDS = {0xD0: "SDF", 0xBE: "DELIMITED", 0xC7: "XLS",
                    0xBB: "XL5", 0xBD: "FOXPLUS", 0xD5: "CSV"}
+# r286-appendtail: SHEET <name> behind the file operand, with no type word or with XL5 or
+# XLS (oracle: `06 15 fc <file> fd bb d6 fc <sheet>`, `fd d6 fb <bare>`). A DELIMITED WITH
+# string may also stand without the CHARACTER word: `be d1 fb <str>`.
+APPEND_SHEET_MARK = 0xD6
 # SHOW WINDOW's own modifier bank, between the 2c and the name (r48-valsweep:
 # `SHOW WINDOW w REFRESH` -> 802cc4f70000, TOP -> 802c29f70000, BOTTOM ->
 # 802c36f70000, SAME -> 802ccff70000). HIDE WINDOW (0x87) takes none of them.
@@ -761,6 +765,11 @@ DELETE_SCOPE_WORDS = {0x03: "ALL", 0x24: "REST", 0x1E: "NEXT",
 DELETE_SCOPE_COUNTED = {"NEXT", "RECORD"}
 DELETE_WHILE_MARK = 0x2B      # WHILE <cond>, its own fc-group
 DELETE_NOOPTIMIZE = 0x30      # NOOPTIMIZE, wired in FRONT of the scope word
+# r286-deltrigger: DELETE TRIGGER ON <table> FOR <event> wires `14 c1 20 <table> 13 <event>`
+# (oracle: FOR DELETE is cd, FOR INSERT d6, FOR UPDATE ce; CREATE TRIGGER spends the same
+# event bytes behind its own FOR). The table is a bare fb name or one fc group.
+DELETE_TRIGGER_MARK = 0xC1
+TRIGGER_EVENT_WORDS = {0xCD: "DELETE", 0xD6: "INSERT", 0xCE: "UPDATE"}
 BLANK_LEAD = 0x93        # r184-blank: BLANK [FIELDS <list>] [<scope>]
                          # [FOR <c>] [WHILE <c>] [IN <area>] [NOOPTIMIZE].
                          # Wire order is 93 [16 <alias>] [11 <list>] [30]
@@ -789,6 +798,10 @@ EXPORT_LEAD = 0x56       # EXPORT TO <file> [FIELDS <list>] TYPE <word>
 # row, which VFP9 refuses on EXPORT, cannot leak in from the shared bank.
 EXPORT_TYPE_WORDS = {0xC7: "XLS", 0xBB: "XL5", 0xBD: "FOXPLUS",
                      0xBE: "DELIMITED", 0xBF: "DIF"}
+# r284-exportnotype: the words that stand alone after the TO operand, with no TYPE
+# keyword in front (`56 28 <file> c7`). FOXPLUS and DELIMITED are compiler
+# diagnostics with the keyword left out, so they are not in this bank.
+EXPORT_BARE_TYPE_WORDS = {0xC7: "XLS", 0xBB: "XL5", 0xBF: "DIF"}
 DOCK_LEAD = 0xBF         # DOCK WINDOW <w> POSITION <n>
 DOCK_POSITION_KW = 0x64  # the POSITION word; the bare-number and AT
                          # forms are refused by this VFP9
@@ -974,7 +987,8 @@ SET_BARE_TO_NAMES = {
 # ---- SET's value-TO id bank — ORACLE-MEASURED r52-setvalue ------------------
 # One program per SET command name for each of three operand spellings: the
 # bare `TO`, the `TO zz` unquoted name, and the `TO (m.a)` group. 60 names
-# carry a value behind the `28` TO mark, the id space is injective, and every
+# carry a value behind the `28` TO mark (61 with STRICTDATE, r286-strictdate),
+# the id space is injective, and every
 # name that also has an ON/OFF form lands on the SAME byte in both sweeps —
 # the agreement between the two halves is what makes this a bank.
 #
@@ -1009,7 +1023,11 @@ SET_VALUE_TO_NAMES = {
     0x7C: "CPCOMPILE", 0x7E: "CLASSLIB", 0x7F: "DATABASE",
     0x80: "DATASESSION", 0x81: "FDOW", 0x82: "FWEEK", 0x86: "COVERAGE",
     0x87: "EVENTTRACKING", 0x88: "NULLDISPLAY", 0x89: "EVENTLIST",
-    0x8A: "DEBUGOUT", 0x91: "TABLEVALIDATE",
+    0x8A: "DEBUGOUT",
+    # r286-strictdate: SET STRICTDATE TO <expr> wires 47 8e 28 fc <expr> (oracle: TO 0, TO 1,
+    # TO lnX, TO (lnX), TO "x"). The bare TO spelling has no operand and stays refused.
+    0x8E: "STRICTDATE",
+    0x91: "TABLEVALIDATE",
 }
 # The five ids whose `TO <name>` operand is a BARE f7 symbol rather than a
 # group or an fb name (r52-setvalue). A bare symbol behind any other id was
@@ -1184,7 +1202,7 @@ AT_SIZE_MARK = 0xD3  # SIZE <r> 07 <c> [07 <n>] (r237-atfont;
                      # DEFINE_WIN_SIZE and kin elsewhere — position decides).
 AT_RANGE_MARK = 0xC7  # RANGE <lo> 07 <hi> behind SIZE (r237-atfont;
                       # STEP/MARK elsewhere — position decides).
-AT_VALID_MARK = 0x2A  # VALID <expr> behind PICTURE on a GET walk (r239-atvalid).
+AT_VALID_MARK = 0x2A  # VALID <expr> behind the GET walk (r239-atvalid, r286-atvalidnopic).
                       # LABEL lead, READ's VALID and SET PRINTER elsewhere —
                       # position decides.
 
