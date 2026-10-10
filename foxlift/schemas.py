@@ -60,6 +60,7 @@ BARE_BYREF = 0xEB                                                   # bare-bank 
 ASSIGN = 0x54      # 54 <lvalue> 10 <expr>                        (everywhere)
 STORE = 0x4A       # 4a fc <expr> fd 28 <target> [07 <target>]*
 PRINTQ = 0x02      # ?  : 02 <count-lit f8 03 N> <arg> [07 <arg>]*
+PRINT_AT_MARK = 0x05  # r276-printat: AT after the one counted ? argument
 PRINTEE = 0x03     # ?? — same shape                               (f7_qm2)
 LOCAL = 0xAE       # ae <name> [07 <name>]*  ; typed adds 51 fb <len> <type>  (f8_typ)
 LPARAMS = 0xAF     # af <name> [07 <name>]*                       (f7_cal FUNCTION F(a,b))
@@ -361,6 +362,9 @@ DEFINE_WINDOW_ATTRS = {
     0xC1: "GROW",       0xC2: "HALFHEIGHT", 0xC3: "NOCLOSE", 0xC6: "NOFLOAT",
     0xC7: "MDI",        0xC8: "NOGROW",     0xCA: "NOMINIMIZE", 0xCB: "NONE",
     0xD0: "PANEL",      0xD1: "NOZOOM",     0xD4: "SYSTEM", 0xD5: "ZOOM",
+    # r217-shadow: the bare-cf SHADOW flag, the byte DEFINE POPUP already
+    # spends as POPUP_SHADOW_MARK and ACTIVATE/SHOW WINDOW as SAME
+    0xCF: "SHADOW",
 }
 ZOOM_WINDOW_LEAD = 0x8C   # 8c 2c <name> <mode> — ZOOM WINDOW (the lead-map
                           # correction recorded in round37 findings D5/C06-core)
@@ -383,6 +387,26 @@ FILE_TYPE_WORDS = {0xD0: "SDF", 0xBE: "DELIMITED", 0xC7: "XLS",
 # 802c36f70000, SAME -> 802ccff70000). HIDE WINDOW (0x87) takes none of them.
 SHOW_WINDOW_MODIFIERS = {0xC4: "REFRESH", 0x29: "TOP", 0x36: "BOTTOM",
                          0xCF: "SAME"}
+# SHOW GET's statement byte and clause marks under lead 0x80 (r218-showget:
+# `SHOW GET w` -> 80c1f70000, DISABLE -> …bf, ENABLE -> …d6, `, 1 PROM
+# "lit"` -> …07fcf80101fd22fcd9<str>). bf is FLOAT under DEFINE WINDOW and
+# MIN under ZOOM, d6 is NORM under ZOOM and NORESET in REPORT — position
+# decides, as elsewhere. The 22 PROMPT mark is the same byte BAR PROMPT
+# and REPORT PROMPT spend in their own slots.
+SHOW_GET_KW = 0xC1
+SHOW_GET_PROMPT_MARK = 0x22
+SHOW_GET_DISABLE_MARK = 0xBF
+SHOW_GET_ENABLE_MARK = 0xD6
+# SHOW GETS / MENU / OBJECT / POPUP and the HIDE twins, outside the SHOW
+# GET c1 slot and the WINDOW 2c arm (r275-showhide). GETS is SHOW-only
+# and its one carried tail is OFF. MENU admits ALL or the _MSYSMENU id
+# only. OBJECT admits one unclosed fc group holding an INT8 whose digits
+# byte is 01. POPUP admits one bare f7 symbol and then the statement ends.
+SHOW_GETS_KW = 0xC2
+SHOW_GETS_OFF = 0x1F
+SHOW_MENU_KW = 0x1C
+SHOW_OBJECT_KW = 0x2E
+SHOW_POPUP_KW = 0xC6
 # MOUSE trailing key/button flags after the coordinate pair (r121-mouse):
 # CONTROL c9, SHIFT c8, ALT c7, LEFT 58, RIGHT 59, MIDDLE 55. Corpus
 # carriers are CONTROL SHIFT (`c9 c8`).
@@ -1148,6 +1172,21 @@ AT_CLEAR_MARK = 0x0C  # operandless CLEAR under lead 0x04 (r145-atclear).
                      # statement-level CLEAR keeps lead 0x0e.
 AT_SAY_MARK = 0xC4
 AT_PICTURE_MARK = 0xC2
+AT_BITMAP_MARK = 0xD1  # SAY's BITMAP flag under lead 0x04 (r221-atbitmap).
+AT_STRETCH_MARK = 0xC8  # SAY's STRETCH flag behind BITMAP (r221-atbitmap).
+AT_GET_MARK = 0xC1  # GET <var> under lead 0x04 (r237-atfont).
+AT_DEFAULT_MARK = 0x0E  # DEFAULT <expr> behind GET (r237-atfont).
+AT_FONT_MARK = 0x40  # FONT <name> [07 <size>] behind GET/DEFAULT (r237-atfont;
+                     # DEFINE_WIN_FONT elsewhere — position decides).
+AT_STYLE_MARK = 0x41  # STYLE <expr> behind FONT (r237-atfont;
+                      # BAR_STYLE_MARK elsewhere — position decides).
+AT_SIZE_MARK = 0xD3  # SIZE <r> 07 <c> [07 <n>] (r237-atfont;
+                     # DEFINE_WIN_SIZE and kin elsewhere — position decides).
+AT_RANGE_MARK = 0xC7  # RANGE <lo> 07 <hi> behind SIZE (r237-atfont;
+                      # STEP/MARK elsewhere — position decides).
+AT_VALID_MARK = 0x2A  # VALID <expr> behind PICTURE on a GET walk (r239-atvalid).
+                      # LABEL lead, READ's VALID and SET PRINTER elsewhere —
+                      # position decides.
 
 SET_SYSMENU_ID = 0x59
 SET_SYSMENU_AUTOMATIC_MARK = 0xBC
@@ -1647,6 +1686,9 @@ REPLACE_LEAD = 0x3E # 3e <lvalue> d1 fc <expr> fd [07 <lvalue> d1 fc <expr> fd]*
                     # A trailing bare 03 after the final pair = ALL clause
                     # (FORCED 9/9 against stored 'REPLACE ... ALL' sources).
 REPLACE_WITH = 0xD1
+REPLACE_NOOPTIMIZE = 0x30  # the NOOPTIMIZE flag, wired ahead of the scope
+                           # word (`… <expr> fd 30 [scope] [FOR …]`); the same
+                           # byte DELETE and SCAN spend there.
 GO_TOP = (0x23, 0x29)   # bare two-byte statement after SELECT — FORCED 27/27
                         # (sources say 'GO TOP' or 'GOTO TOP'; identical bytecode)
 GO_BOTTOM_MARK = 0x36   # 23 36 = GO BOTTOM — TOKEN_REFERENCE:73 '23 29/36 GO/GOTO

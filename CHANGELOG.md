@@ -3,6 +3,54 @@
 FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the version in
 `pyproject.toml`.
 
+## 0.9.0 — 2026-10-10
+
+The wave-5 close: on the second corpus's development split every compiled
+program now lifts and no refusal is left, and both sealed splits were opened
+once more.
+
+- Second corpus, development split: every section lifts (103,363 of 103,363),
+  and now every compiled program does too, 5,476 of 5,476 (0.8.0: 5,305).
+  Named refusals on the scored walk fell from 85 to 0. Table path 274,262 of
+  279,698 positional (0.8.0: 274,063) and 275,522 of 277,658 live-record
+  (99.23%, 0.8.0: 275,323), with no section lost against 0.8.0.
+- First corpus: table path 29,595 of 29,597 and compiled programs 1,051 of
+  1,051, unchanged. The wave-5 close read 29,593: one wave-5 law, REPLACE's
+  FOR-before-ALL order, took a FOR that a later statement interned for the
+  current statement's own. Round 281 narrowed it before this release; the
+  second corpus's development output is byte-identical with and without the
+  fix.
+- Both sealed splits opened once at the wave-5 close, with no tuning after,
+  on the lifter before that fix. The first corpus's held-out split lifts
+  1,030 of 1,030. The second corpus's sealed split lifts 13,976 of 13,978
+  (99.99%, 0.8.0: 13,969); its refusal classes fell from 5 to 2, none new.
+  Its table path reads 3,811 of 3,971 (0.8.0: 3,807), and half of the
+  registered eight-section symbol-table pattern closed.
+- Authored population 1,913 of 1,917 equal (0.8.0: 1,880), 0 regressed. The
+  lifter refuses none of it; the four left are three `/`-fold programs and
+  one phantom section.
+- Statements measured and read since 0.8.0: ASSERT ... MESSAGE; SET CLOCK
+  STATUS, SET HELP SYSTEM, SET SCOREBOARD and SET PRINTER TO NAME; SET
+  PROCEDURE and SET INDEX name lists; DISPLAY MEMORY LIKE; PROTECTED and
+  HIDDEN with array dimensions; ON SELECTION PAD, POPUP and MENU; DEFINE
+  WINDOW SHADOW and COLOR pairs; SHOW GET; @ SAY BITMAP, the @ GET clause
+  bank and VALID after PICTURE; ALTER TABLE ... AUTOINC NEXTVALUE and ADD
+  without COLUMN; REPLACE NOOPTIMIZE and its FOR/ALL and IN/FOR clause
+  orders; LIST STRUCTURE TO ... ADDITIVE; CALCULATE ... IN; PACK IN; APPEND
+  FROM ... FIELDS; PRIVATE and ZOOM WINDOW with quoted names; VALIDATE
+  DATABASE; DROP TABLE ... RECYCLE; SUM ALL TO ARRAY; BROWSE FIELDS with a
+  member reference; EXPORT ... FOR; RUN with a double-quoted payload; SELECT
+  with a star between columns, a second qualified star, a star in a UNION
+  arm or a trailing DISTINCT, ORDER BY ahead of WHERE, COUNT spelled COUN or
+  CNT, and integer items in an IN list; DO WITH/IN, SEEK IN/ORDER and COPY
+  FOR/WHILE in the order the symbol table records; ISBLANK by reference;
+  currency literals; SHOW and HIDE of GETS, MENU, OBJECT and POPUP; MENU TO;
+  SIZE POPUP; APPEND GENERAL FROM; RENAME with quoted names; `?` with an AT
+  column; a bare AS type mark; and a zero-argument memory-variable call.
+- Reconstruction moves a procedure's leading blank lines ahead of its
+  PROCEDURE line when VFP9's line numbering needs them there.
+- The compile oracle deletes its transfer archives after each batch.
+
 ## 0.8.0 — 2026-09-25
 
 The wave-4 close: every wave-4 lane measured together on one tree, both sealed

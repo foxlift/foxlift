@@ -171,6 +171,12 @@ TABLE: dict = {
     (10, 0, True, "0000000084d79741"): "10^8",
     # fa 0a 00 cc  214748364.7  x2
     (10, 0, True, "666666999999a941"): "2147483647/10",
+    # fa 09 03 cc  7916.1669999999995  x2
+    # shortest confirmed expression; the header token 07916.167 is the other ulp
+    (9, 3, True, "6e1283c02aecbe40"): "2010.167+5906",
+    # fa 0a 03 cc  -5728.6669999999995  x2
+    # shortest confirmed expression; the header token -05728.667 is the other ulp
+    (10, 3, True, "6e1283c0aa60b6c0"): "-3718.5-2010.167",
     # fa 0b 00 cc  65535.0  x1
     (11, 0, True, "00000000e0ffef40"): "4^8-1",
     # fa 0b 00 cc  16777215.0  x1

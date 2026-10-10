@@ -215,7 +215,7 @@ shows no marker). The trailing closer is still the callee.
 | binary | `ff 01 <u16 len LE> <raw bytes>` | `ff 01 02 00 efbb` = `0hEFBB`; odd nibbles pad high-first; empty `0h` = len 0. Round-27 |
 | date | `ee <8B>` | `{}`/`{:}`/`{//}` all = ee + zero payload; `{^2024-01-31}` = ee 000000805ac54241. Round-27 |
 | datetime | `e6 <8B>` | `{^2024-01-31 12:34:56}` = e6 6bed1ac35ac54241. Round-27 |
-| currency | `de <08/06 open> 04 <8B i64LE scaled x10^4>` | `$100.50` = de 08 04 c8550f0000000000; byte-2 open (08/06). Round-27 |
+| currency | `de <width> 04 <8B i64LE scaled x10^4>` | `$100.50` = de 08 04 c8550f0000000000. Byte 2 is the character count of the value written with four decimals (`100.5000` = 8, `1.0000` = 6); trailing fractional zeros share one wire, and a leading-zero spelling (`$01`) stores a wider byte 2. Round-27, round-274 |
 
 Digits prefix = decimal character count of the value's source representation.
 

@@ -179,6 +179,10 @@ def _compile_batch(src_dir: Path, prgs: list, compile_as: int | None) -> dict[st
 
         down = td / "out.zip"
         _scp(f"{VM}:{out_zip}", str(down))
+        # The guest keeps nothing from a batch: left behind, these zips fill its disk. A missed
+        # delete costs space only, so its result is not checked. driver_script stays as it is:
+        # its text is part of the compile cache's identity. The guest's ssh shell is PowerShell.
+        _ssh([f"Remove-Item -Force -ErrorAction SilentlyContinue {in_zip},{out_zip}"])
         got = td / "out"
         shutil.unpack_archive(str(down), str(got))
 
