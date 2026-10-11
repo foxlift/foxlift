@@ -39,6 +39,23 @@ def prg_bytes(lines) -> bytes:
     return b"\n".join(l.encode(CARRIER) for l in lines) + (b"\n" if lines else b"")
 
 
+def table_prg_bytes(lines, codec: str | None) -> bytes:
+    """prg_bytes for a module parsed with a table's code page (container.parse codec=).
+
+    That codec decodes symbol names and string payloads, so a CJK identifier or a cp1252
+    quote arrives above U+00FF where CARRIER cannot hold it. Encoding the lines back
+    through the same codec restores the stored bytes. Raises UnicodeEncodeError when
+    neither carries every line: a latin-1-carried payload beside such a character.
+    """
+    lines = list(lines)
+    try:
+        return prg_bytes(lines)
+    except UnicodeEncodeError:
+        if not codec:
+            raise
+    return b"\n".join(l.encode(codec) for l in lines) + (b"\n" if lines else b"")
+
+
 def display_text(raw: bytes) -> str:
     """Human/test-facing rendering of stored source bytes (strict CP936).
 

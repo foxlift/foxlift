@@ -3,6 +3,48 @@
 FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the version in
 `pyproject.toml`.
 
+## 0.9.3 — 2026-10-11
+
+`decompile` reads APP and EXE files through their directory, and SQL SELECT keeps
+INTO ARRAY ahead of WHERE. Both came up on the same production application. The
+directory walk and the INTO ARRAY order were each reproduced with authored programs
+compiled by VFP9 and fixed against those; running the walk over both corpora found the
+code-page, report and deleted-record fixes below. None of that application's code is
+evidence or ships.
+
+- `decompile` on an `.app` or `.exe` walks the container's own directory. Every compiled
+  member and every form, class library or report gets a `NNNN_<name>/` folder, `NNNN`
+  its directory position, and is lifted as the same file on its own would be; the JSON
+  result lists every entry with its kind. 0.9.2 scanned the bytes for module headers and
+  wrote `module_<offset>/` folders. That scan read the APP header as one more module,
+  and in a form's or class library's memo file it read past each record's code into
+  leftover memo bytes, lifting procedures and sections no record holds. Its `verified`
+  on an APP or EXE counted those. On an EXE whose APP header sits behind an application
+  icon, the header module came out empty and `decompile` exited 2.
+- Forms and class libraries whose code holds names or strings in their table's code
+  page, GBK for example, decompile. 0.9.2 stopped on such a file with an encoding error
+  (exit 1). The text reaches `source.prg` as the bytes the table stores.
+- `decompile` and `inspect` read reports and labels (`.frx`, `.lbx`), on their own and
+  inside an APP or EXE: the compiled code of a report's data environment is lifted as a
+  form's is. 0.9.2 refused these files as unsupported input.
+- A deleted record's code is still not lifted. The JSON result now counts the deleted
+  records that hold code, in `records_deleted_with_code`.
+- SQL SELECT keeps INTO ARRAY ahead of WHERE when the source wrote it there and the
+  array, a bare name, `m.name` or an object's property, is first named by that
+  statement. The compiler numbers the array's names where INTO was written. 0.9.2 read
+  that order for INTO CURSOR and INTO TABLE only and wrote INTO ARRAY behind WHERE, so
+  the recompiled program numbered its symbols differently. Where the array was declared
+  earlier, or the WHERE names nothing new, both orders compile to the same bytes and
+  WHERE stays first. INTO ARRAY with ORDER BY is not covered.
+- Measured figures are 0.9.0's. The INTO ARRAY change moves no section in either corpus
+  or in the authored population. The directory walk changes none of the code those
+  figures read; it was measured with `decompile` itself, 0.9.2 against 0.9.3, over the
+  68 APP and EXE files of both corpora's scored splits. 19 verify where 14 did, and none
+  that verified stops verifying. Modules rise from 12,152 to 12,336 and sections fall
+  from 51,815 to 51,714. 118 lifted texts in 0.9.2's output are not in 0.9.3's: 91 were
+  read past a record's code, 20 were APP headers, 6 came from deleted records and 1 from
+  a report memo block no record points to. The sealed splits were not reopened.
+
 ## 0.9.2 — 2026-10-10
 
 More fixes from the same production application, each reproduced with authored

@@ -41,6 +41,8 @@ foxlift decompile app.exe -o recovered
 
 `decompile` exits with `0` only when every discovered section was lifted inside the supported slice. Exit code `2` means partial output was written but could not be fully verified. Invalid or unsupported input exits with `1`.
 
+On an `.app` or `.exe`, `decompile` reads the container's own directory: every compiled member and every form, class library or report gets a `NNNN_<name>/` folder, lifted exactly as the same file on its own would be.
+
 Extract an application into a named project tree:
 
 ```console

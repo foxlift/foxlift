@@ -11231,7 +11231,7 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
                        to_txt, readwrite, nofilter, display, syms,
                        cur_literal, where_new, cols_after=None,
                        star_mid=False, star_mid_txt="*",
-                       order_before_where=False):
+                       order_before_where=False, into_array_new=()):
     """The SELECT statement text, once every clause has been read.
 
     ``star_mid`` is a star that sits between two column groups
@@ -11320,11 +11320,19 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
     # table, a FROM alias and a projection column are numbered ahead of the
     # INTO cursor whichever order the source wrote, so a WHERE that names one
     # of them says nothing about its position (oracle round290_intowhere.json).
+    # r292-intoarray: an INTO ARRAY target is a symbol operand, numbered where
+    # the source wrote it, so the earliest name it introduces stands for the
+    # clause. A property target takes its earliest new operand, which is the
+    # object when only the property was declared before (oracle
+    # round292_intoarray.json, cells 5d and 5c). A target with no new name is
+    # a tie and keeps WHERE first.
+    into_idx = _table_new_index(syms, cur_literal)
+    if into_idx is None:
+        into_idx = min(into_array_new, default=None)
     into_first = (
         where_expr is not None and not group_terms and not order_terms
         and having_expr is None
-        and _written_first(_table_new_index(syms, cur_literal),
-                           min(where_new, default=None)))
+        and _written_first(into_idx, min(where_new, default=None)))
     # r37 P3 (C13): the d7 tag is emitted ONCE, by _emit_line via the
     # readwrite flag — appending it here too doubled the tag on the
     # wire-visible text ('READWRITE READWRITE', rejected by VFP). The tag
@@ -11360,6 +11368,7 @@ def _dec_sql_select_dest(buf, pos, end, syms):
     j = pos
     into_txt = None
     literal = None
+    array_syms = ()
 
     def _group(k):
         es, k2 = _dec_expr(buf, k + 1, end, syms, stop_bytes=_IF_COND_STOP)
@@ -11377,14 +11386,17 @@ def _dec_sql_select_dest(buf, pos, end, syms):
         if word == "ARRAY":
             if k + 3 <= end and buf[k] == S.SYM:
                 name = _sym(syms, S.u16(buf, k + 1))
+                array_syms = (S.u16(buf, k + 1),)
                 k += 3
             elif k + 5 <= end and buf[k] == S.WORKAREA_REF \
                     and buf[k + 1] == 0x0D and buf[k + 2] == S.SYM:
                 name = "m." + _sym(syms, S.u16(buf, k + 3))
+                array_syms = (S.u16(buf, k + 3),)
                 k += 5
             elif k + 6 <= end and buf[k] == S.MEMBER and buf[k + 3] == S.SYM:
                 name = "%s.%s" % (_sym(syms, S.u16(buf, k + 1)),
                                   _sym(syms, S.u16(buf, k + 4)))
+                array_syms = (S.u16(buf, k + 1), S.u16(buf, k + 4))
                 k += 6
             elif k < end and buf[k] == S.FC:
                 name, k = _group(k)
@@ -11454,7 +11466,8 @@ def _dec_sql_select_dest(buf, pos, end, syms):
         return None
     return {"into": into_txt, "to": to_txt, "words": tuple(words),
             "readwrite": readwrite, "nofilter": nofilter,
-            "preference": preference, "literal": literal}
+            "preference": preference, "literal": literal,
+            "array_syms": array_syms}
 
 
 def _sql_agg_close(buf, i, end):
@@ -16366,10 +16379,16 @@ def _dec_statement(buf, syms):
         # the statement writes and where it ends; when it does not, the walk
         # falls back to the pre-r74 forward scan below so nothing that lifted
         # before this law stops lifting.
+        # r292-intoarray: the names the INTO ARRAY target introduces, against the
+        # names the statement resolved before it. _SYM_SEEN is read before the
+        # destination decode appends the target's own operands to it.
+        _into_already = set(_SYM_SEEN)
         _dest = _dec_sql_select_dest(buf, pos, end, syms)
         if _dest is not None:
             into_txt = _dest["into"]
             cur_literal = _dest["literal"]
+            into_array_new = _introduced(_dest["array_syms"], _into_already,
+                                         _SYM_TABLE_HI)
             to_txt = _dest["to"] or ""
             readwrite = _dest["readwrite"]
             nofilter = _dest["nofilter"]
@@ -16397,7 +16416,8 @@ def _dec_statement(buf, syms):
                 nofilter, display, syms, cur_literal, _where_new,
                 cols_after=cols_after, star_mid=star_mid,
                 star_mid_txt=star_mid_txt,
-                order_before_where=order_before_where)
+                order_before_where=order_before_where,
+                into_array_new=into_array_new)
         for scan in range(pos, end - 1):
             pair = buf[scan:scan + 2]
             if scan == pos and pair == bytes(S.SQL_INTOARRAY_MARK) \

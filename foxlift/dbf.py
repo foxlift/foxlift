@@ -6,6 +6,8 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from foxlift.container import ACCEPTED_MAGICS
+
 # .scx/.vcx/.frx/.mnx are DBF tables; their memo side-files carry the same stem.
 MEMO_EXT = {".scx": ".sct", ".vcx": ".vct", ".frx": ".frt", ".mnx": ".mnt",
             ".dbf": ".fpt", ".lbx": ".lbt", ".pjx": ".pjt"}
@@ -407,6 +409,32 @@ def table_codec(path: Path) -> str | None:
     """
     t = Table(path)
     return CODE_PAGE_MARKS.get(t.code_page_mark)
+
+
+def code_records(path: Path):
+    """Yield (objname, bytecode, deleted) for every record that carries compiled code.
+
+    A form or class library keeps it in OBJCODE (every record objcode_records yields, so a
+    METHODS-only record comes with empty bytecode). A report or label keeps its
+    DataEnvironment's compiled methods in TAG2, where other records keep printer data:
+    there only a TAG2 that starts with a module magic is code (measured: 206 such records
+    in scored-split reports, all OBJTYPE 25 or 26). Deleted records come flagged, not
+    skipped, so a caller can count them.
+    """
+    t = Table(path)
+    names = {f.name for f in t.fields}
+    if {"METHODS", "OBJCODE"} <= names:
+        for row in t.records():
+            src, code = row.get("METHODS", b""), row.get("OBJCODE", b"")
+            if src or code:
+                yield (decode_text(row.get("OBJNAME", b""), t.code_page_mark).strip(),
+                       code, row["_deleted"])
+    elif "TAG2" in names:
+        for row in t.records():
+            code = row.get("TAG2", b"")
+            if code[:4] in ACCEPTED_MAGICS:
+                yield (decode_text(row.get("NAME", b""), t.code_page_mark).strip(),
+                       code, row["_deleted"])
 
 
 def objcode_records(path: Path):
