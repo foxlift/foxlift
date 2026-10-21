@@ -6,8 +6,8 @@ FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the v
 ## 0.9.4 — 2026-10-21
 
 Line numbers and SQL clause order. Each rule was measured with authored programs compiled
-by VFP9 and checked on both corpora's development splits, section by section, against
-0.9.3.
+by VFP9 and checked section by section against 0.9.3 on both corpora's development and
+validation splits.
 
 - `LINENO()` written inside an ON ERROR, ON ESCAPE, ON SHUTDOWN, ON READERROR or ON KEY
   LABEL handler, or on a `\` or `\\` text-merge line, is not a stored line number: the
@@ -29,8 +29,8 @@ by VFP9 and checked on both corpora's development splits, section by section, ag
   of 62 authored statements with their symbols numbered differently; all 62 recompile equal
   now. A name that an earlier statement already wrote, or an ORDER BY that names nothing new,
   compiles the same in either order, and INTO stays last. GROUP BY and HAVING keep INTO
-  last. On the development splits 5 sections and 1 program recompile equal that did not,
-  0 broken.
+  last. On the development and validation splits 5 sections and 1 program recompile equal
+  that did not, 0 broken.
 - Measured figures are 0.9.0's. None of these changes moves a program of the authored
   population. The sealed splits were not reopened.
 
