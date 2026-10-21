@@ -2409,6 +2409,10 @@ _SYM_TAPS = []
 # order. A clause introduces a name only when the name is absent here.
 # Cleared at each statement edge, including the retry pass.
 _SYM_SEEN = []
+# r293-intoorder: the names an earlier statement of the section spelled as a string
+# (an INTO CURSOR name, a FROM name). Such an entry has no operand, so it never raises
+# _SYM_TABLE_HI, yet the earlier statement numbered it. None outside a section walk.
+_SYM_SPELLED = None
 
 
 class _sym_tap:
@@ -2485,6 +2489,38 @@ def _introduced(idxs, already, hi):
     return out
 
 
+def _spelled_names(buf):
+    """Casefolded text of each string token in one statement stream (r293-intoorder)."""
+    names = set()
+    i, n = 0, len(buf)
+    while i + 3 <= n:
+        if buf[i] in (S.STR, S.STR2):
+            ln = S.u16(buf, i + 1)
+            if i + 3 + ln <= n:
+                names.add(buf[i + 3:i + 3 + ln].decode("latin1").casefold())
+            i += 3 + ln
+            continue
+        i += 1
+    return names
+
+
+def _spelled_earlier(syms, idx) -> bool:
+    """Did an earlier statement of the section spell the entry at idx as a string?
+
+    The entry was numbered by that statement, so it is not new to this one. The
+    high-water cannot tell: an entry with no operand never raised it (r293-intoorder).
+    """
+    if _SYM_SPELLED is None or idx is None or not 0 <= idx < len(syms):
+        return False
+    name = syms[idx]
+    return isinstance(name, str) and name.casefold() in _SYM_SPELLED
+
+
+def _unspelled(syms, idxs):
+    """The indexes that no earlier statement of the section spelled (r293-intoorder)."""
+    return [i for i in idxs if not _spelled_earlier(syms, i)]
+
+
 def _without_spelled_earlier(buf, order_at, syms, idxs):
     """Drop indexes whose text is already a string before ORDER BY.
 
@@ -2532,6 +2568,22 @@ def _order_written_first(where_idxs, where_already, order_idxs, order_already,
     if not where_new or not order_new:
         return False
     return max(order_new) < min(where_new)
+
+
+def _into_clause_split(into_idx, clauses):
+    """How many emitted clauses stand ahead of an INTO target, or None.
+
+    ``clauses`` holds (text, lowest new index or None) in the order the statement
+    emits them. The INTO target was written ahead of the first clause whose lowest
+    new name is numbered above the target's own. None when the target has no index
+    or no clause qualifies, which keeps INTO last.
+    """
+    if into_idx is None:
+        return None
+    for k, (_, idx) in enumerate(clauses):
+        if idx is not None and idx > into_idx:
+            return k
+    return None
 
 
 def _replace_all_first(syms, all_scope, in_spec, for_cond, *, word="ALL",
@@ -11231,12 +11283,14 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
                        to_txt, readwrite, nofilter, display, syms,
                        cur_literal, where_new, cols_after=None,
                        star_mid=False, star_mid_txt="*",
-                       order_before_where=False, into_array_new=()):
+                       order_before_where=False, into_array_new=(),
+                       order_new=None):
     """The SELECT statement text, once every clause has been read.
 
     ``star_mid`` is a star that sits between two column groups
     (``col, *, col2`` or ``col, alias.*, col2``). ``star_mid_txt`` is
-    that star. ``cols_after`` is the group behind it.
+    that star. ``cols_after`` is the group behind it. ``order_new`` is the
+    lowest name the ORDER BY introduces, None when it introduces none.
     """
     sel_kw = ["SELECT"]
     trail_distinct = ""
@@ -11315,7 +11369,7 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
     # the table says which came first. Measured for a WHERE alone. A
     # GROUP BY or HAVING in the same statement gives INTO a third position
     # and neither of those orders is measured. ORDER BY with WHERE is
-    # r271-orderfirst, above; INTO still follows both.
+    # r271-orderfirst, above; ORDER BY and INTO is r293-intoorder, below.
     # r290-intowhere: only the names the WHERE introduces decide it. The FROM
     # table, a FROM alias and a projection column are numbered ahead of the
     # INTO cursor whichever order the source wrote, so a WHERE that names one
@@ -11326,22 +11380,39 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
     # object when only the property was declared before (oracle
     # round292_intoarray.json, cells 5d and 5c). A target with no new name is
     # a tie and keeps WHERE first.
+    # r293-intoorder: an ORDER BY name is numbered where the source wrote it, the
+    # same as a WHERE name, so the INTO target stands ahead of the first emitted
+    # clause whose lowest new name sits above the target's own, and behind the
+    # clauses before it (oracle round293_intoorder.json: an INTO between WHERE and
+    # ORDER BY, between ORDER BY and WHERE, and ahead of both, with INTO ARRAY,
+    # INTO CURSOR, INTO TABLE, a memvar and a property target). With no such clause
+    # INTO stays last. GROUP BY and HAVING keep INTO last.
+    # With an ORDER BY, a name an earlier statement spelled is not new (r293-intoorder).
+    # Without one the names are read as main reads them, which keeps r290's WHERE rule.
+    if order_terms:
+        where_new = _unspelled(syms, where_new)
+        into_array_new = _unspelled(syms, into_array_new)
     into_idx = _table_new_index(syms, cur_literal)
+    if order_terms and _spelled_earlier(syms, into_idx):
+        into_idx = None
     if into_idx is None:
         into_idx = min(into_array_new, default=None)
-    into_first = (
-        where_expr is not None and not group_terms and not order_terms
-        and having_expr is None
-        and _written_first(into_idx, min(where_new, default=None)))
+    clauses = [(where_txt, min(where_new, default=None)), (order_txt, order_new)]
+    if order_before_where:
+        clauses.reverse()
+    clauses = [c for c in clauses if c[0]]
+    split = None if group_terms or having_expr is not None \
+        else _into_clause_split(into_idx, clauses)
     # r37 P3 (C13): the d7 tag is emitted ONCE, by _emit_line via the
     # readwrite flag — appending it here too doubled the tag on the
     # wire-visible text ('READWRITE READWRITE', rejected by VFP). The tag
     # belongs to the INTO clause, so what the source wrote after that
     # clause travels in tail_text and the emitter still places the tag.
-    if into_first:
-        return SqlSelectColumns(head + into_txt + to_txt, readwrite=readwrite,
-                                nofilter=nofilter, tail_text=rest,
-                                display=display)
+    if split is not None:
+        return SqlSelectColumns(
+            head + "".join(t for t, _ in clauses[:split]) + into_txt + to_txt,
+            readwrite=readwrite, nofilter=nofilter,
+            tail_text="".join(t for t, _ in clauses[split:]), display=display)
     return SqlSelectColumns(head + rest + into_txt + to_txt,
                             readwrite=readwrite, nofilter=nofilter,
                             display=display)
@@ -11958,6 +12029,8 @@ def dec_statement(buf, syms):
     finally:
         if _SYM_TABLE_HI is not None and _SYM_STMT_HI > _SYM_TABLE_HI:
             _SYM_TABLE_HI = _SYM_STMT_HI
+        if _SYM_SPELLED is not None:
+            _SYM_SPELLED.update(_spelled_names(buf))
 
 
 _TEXT_FLAG_MARKS = (S.TEXT_FLAG_TEXTMERGE, S.TEXT_FLAG_NOSHOW, S.TEXT_FLAG_ADDITIVE,
@@ -16330,6 +16403,9 @@ def _dec_statement(buf, syms):
         order_before_where = _order_written_first(
             _where_added, _where_already, _order_added, _order_already,
             group_terms, having_expr, where_expr, order_terms)
+        # r293-intoorder: the lowest name the ORDER BY introduces, None when it has none
+        _order_new = min(_unspelled(syms, _introduced(_order_added, _order_already,
+                                                     _SYM_TABLE_HI)), default=None)
         # DESC flag
         if pos < end and buf[pos] == S.SQLSEL_DESC_MARK:
             desc = True
@@ -16417,7 +16493,7 @@ def _dec_statement(buf, syms):
                 cols_after=cols_after, star_mid=star_mid,
                 star_mid_txt=star_mid_txt,
                 order_before_where=order_before_where,
-                into_array_new=into_array_new)
+                into_array_new=into_array_new, order_new=_order_new)
         for scan in range(pos, end - 1):
             pair = buf[scan:scan + 2]
             if scan == pos and pair == bytes(S.SQL_INTOARRAY_MARK) \
@@ -16480,7 +16556,7 @@ def _dec_statement(buf, syms):
             order_terms, into_txt, to_txt, readwrite, nofilter, display,
             syms, cur_literal, _where_new, cols_after=cols_after,
             star_mid=star_mid, star_mid_txt=star_mid_txt,
-            order_before_where=order_before_where)
+            order_before_where=order_before_where, order_new=_order_new)
         j += 1
         where = None
         if buf[j] == 0xC6:
@@ -20149,11 +20225,12 @@ def lift_section(sec, syms_override=None, keep_marks=False):
     # (round-40 lane E, _menu_bar_shifted_section). Module state for the same
     # reason dec_statement uses it: the reader sits deep under the walk and
     # statement decoding is single-threaded and never nested.
-    global _MENU_SHIFTED_BLOCK, _PAYLOAD_CODEC, _SYM_TABLE_HI
+    global _MENU_SHIFTED_BLOCK, _PAYLOAD_CODEC, _SYM_TABLE_HI, _SYM_SPELLED
     global _SQL_DISTINCT_N, _SQL_DISTINCT_NAMES, _SQL_COUNT_ABBR
     outer = _MENU_SHIFTED_BLOCK
     prev_codec = _PAYLOAD_CODEC
     prev_hi = _SYM_TABLE_HI
+    prev_spelled = _SYM_SPELLED
     prev_distinct = _SQL_DISTINCT_N
     prev_names = _SQL_DISTINCT_NAMES
     prev_count = _SQL_COUNT_ABBR
@@ -20163,6 +20240,7 @@ def lift_section(sec, syms_override=None, keep_marks=False):
     # statement" is knowable here and nowhere else. Outside this window the
     # high-water is None and every canonicalised clause order stays canonical.
     _SYM_TABLE_HI = -1
+    _SYM_SPELLED = set()
     # r74-keyword: the section's DISTINCT entries are consumed in source order,
     # which is knowable here and nowhere else.
     _SQL_DISTINCT_N = 0
@@ -20178,6 +20256,7 @@ def lift_section(sec, syms_override=None, keep_marks=False):
         _MENU_SHIFTED_BLOCK = outer
         _PAYLOAD_CODEC = prev_codec
         _SYM_TABLE_HI = prev_hi
+        _SYM_SPELLED = prev_spelled
         _SQL_DISTINCT_N = prev_distinct
         _SQL_DISTINCT_NAMES = prev_names
         _SQL_COUNT_ABBR = prev_count
@@ -20239,9 +20318,27 @@ def _lineno_stored(mod):
     return out
 
 
+# r294-onlineno: ON ERROR / ESCAPE / SHUTDOWN / READERROR / KEY LABEL keep the
+# handler as fb command text (round 20), and the oracle stores no e9 0a fold
+# for a LINENO() spelled in it (round294_onlineno_streams.json). Counting it
+# left the hits one longer than the stored folds and the module unplaced.
+_ON_HANDLER_RE = _re.compile(
+    r"^\s*ON\s+(?:ERROR|ESCAPE|SHUTDOWN|READERROR|KEY\s+LABEL)\b", _re.I)
+
+
+# r296-mergeline: a `\` / `\\` merged-output line keeps its text as fb text
+# (lead 0x8d / 0x8e), and the oracle stores no e9 0a fold for a LINENO()
+# spelled in it, bare, inside <<...>> or indented in a block
+# (round296_lineno_streams.json, cells merge_line*). Counting it left the
+# hits longer than the stored folds and the module unplaced.
+_MERGE_LINE_RE = _re.compile(r"^\s*\\")
+
+
 def _lineno_hits(lines):
     hits = []
     for i, ln in enumerate(lines):
+        if _ON_HANDLER_RE.match(ln) or _MERGE_LINE_RE.match(ln):
+            continue
         for _ in _LN_HIT_RE.finditer(ln):
             hits.append(i)
     return hits

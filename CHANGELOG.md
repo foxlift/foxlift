@@ -3,6 +3,37 @@
 FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the version in
 `pyproject.toml`.
 
+## 0.9.4 — 2026-10-21
+
+Line numbers and SQL clause order. Each rule was measured with authored programs compiled
+by VFP9 and checked on both corpora's development splits, section by section, against
+0.9.3.
+
+- `LINENO()` written inside an ON ERROR, ON ESCAPE, ON SHUTDOWN, ON READERROR or ON KEY
+  LABEL handler, or on a `\` or `\\` text-merge line, is not a stored line number: the
+  compiler keeps that statement as text. 0.9.3 counted those spellings, found more than the
+  compiled code holds, and wrote the whole record without line placement, so every
+  `LINENO()` in it recompiled on the wrong line. Now the handler and merge-line spellings
+  are skipped and the record is placed. On the development splits 190 sections recompile
+  equal that did not: 140 in seven copies of one class library (115,425 to 115,565 equal of
+  115,586) and 50 in two forms (404 to 454 of 454), with 0 broken. Four programs recompile
+  equal whole. Placement pads with blank lines to reach the stored line numbers, so one of
+  those programs lifts to 162,137 lines where 0.9.3 wrote 7,450.
+- `LINENO()` inside a string literal is not a stored line number either, but this release
+  does not skip it: on the development program where these strings make the count
+  disagree, skipping them makes placement fail at a later fold. That program keeps 0.9.3's
+  text.
+- SQL SELECT writes INTO ARRAY, INTO CURSOR and INTO TABLE against ORDER BY where the
+  source wrote it, when the target's name is first written by that statement. The compiler
+  numbers names in source order, so 0.9.3, which wrote INTO after ORDER BY, recompiled 27
+  of 62 authored statements with their symbols numbered differently; all 62 recompile equal
+  now. A name that an earlier statement already wrote, or an ORDER BY that names nothing new,
+  compiles the same in either order, and INTO stays last. GROUP BY and HAVING keep INTO
+  last. On the development splits 5 sections and 1 program recompile equal that did not,
+  0 broken.
+- Measured figures are 0.9.0's. None of these changes moves a program of the authored
+  population. The sealed splits were not reopened.
+
 ## 0.9.3 — 2026-10-11
 
 `decompile` reads APP and EXE files through their directory, and SQL SELECT keeps
@@ -19,8 +50,9 @@ evidence or ships.
   wrote `module_<offset>/` folders. That scan read the APP header as one more module,
   and in a form's or class library's memo file it read past each record's code into
   leftover memo bytes, lifting procedures and sections no record holds. Its `verified`
-  on an APP or EXE counted those. On an EXE whose APP header sits behind an application
-  icon, the header module came out empty and `decompile` exited 2.
+  on an APP or EXE counted those. On the production application's EXE, whose APP header
+  sits behind an application icon, the header module came out empty and `decompile`
+  exited 2.
 - Forms and class libraries whose code holds names or strings in their table's code
   page, GBK for example, decompile. 0.9.2 stopped on such a file with an encoding error
   (exit 1). The text reaches `source.prg` as the bytes the table stores.
