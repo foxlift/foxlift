@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import struct
 from pathlib import Path
 
@@ -57,11 +58,13 @@ def reconstruct_table(path: Path) -> tuple[Table, list[dict]]:
     names = {f.name for f in table.fields}
     if not {"METHODS", "OBJCODE"} <= names:
         return table, [{"error": "not a METHODS/OBJCODE table"}]
+    record_names = {}
     for i, row in enumerate(table.records()):
         code = row.get("OBJCODE", b"") or b""
         if not code:
             notes.append({"index": i, "action": "skip_empty_objcode"})
             continue
+        record_names[i] = _objcode_names(code, codec)
         try:
             methods = methods_bytes_from_objcode(code, codec=codec)
         except (lifter.Unsupported, ValueError) as exc:
@@ -71,11 +74,42 @@ def reconstruct_table(path: Path) -> tuple[Table, list[dict]]:
         intents = table.reconstruct_methods(i, methods, clear_objcode=True)
         notes.append({"index": i, "action": "reconstructed",
                       "methods_len": len(methods), "intents": len(intents)})
-    notes.extend(clear_unresolvable_include(table, path))
+    notes.extend(clear_unresolvable_include(table, path, record_names))
     return table, notes
 
 
-def clear_unresolvable_include(table: Table, src: Path) -> list[dict]:
+def _objcode_names(code: bytes, codec) -> set:
+    """Every symbol-table name of one OBJCODE module, uppercased."""
+    try:
+        mod = container.parse(code, codec=codec)
+    except Exception:  # noqa: BLE001 - an unparsable module names nothing
+        return set()
+    return {n.upper() for sec in mod.sections for n in sec.symbols}
+
+
+_DEFINE = re.compile(rb"^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][A-Za-z0-9_]*)",
+                     re.IGNORECASE | re.MULTILINE)
+_INCLUDE = re.compile(rb"^[ \t]*#[ \t]*include[ \t]+[\"']?([^\"'\r\n]+?)[\"']?[ \t]*\r?$",
+                      re.IGNORECASE | re.MULTILINE)
+
+
+def _header_defines(header: Path, depth: int = 0) -> set:
+    """The names a header #DEFINEs, uppercased, through nested includes beside it."""
+    try:
+        raw = header.read_bytes()
+    except OSError:
+        return set()
+    out = {m.group(1).decode("latin-1").upper() for m in _DEFINE.finditer(raw)}
+    if depth < 4:
+        for m in _INCLUDE.finditer(raw):
+            nested = header.parent / m.group(1).decode("latin-1").strip()
+            if nested.is_file():
+                out |= _header_defines(nested, depth + 1)
+    return out
+
+
+def clear_unresolvable_include(table: Table, src: Path,
+                               record_names: dict | None = None) -> list[dict]:
     """Zero IncludeFile (RESERVED8) when the named .h is not resolvable.
 
     wincrypt.h / _reports.h stay: the compile driver copies them from VFP FFC
@@ -97,7 +131,23 @@ def clear_unresolvable_include(table: Table, src: Path) -> list[dict]:
         if not header:
             continue
         beside = src.parent / header
-        if beside.is_file() or header.lower() in FFC_INCLUDE_HEADERS:
+        if header.lower() in FFC_INCLUDE_HEADERS:
+            continue
+        if beside.is_file():
+            # r298-staleinclude: the lifted source is post-preprocessor text,
+            # so an applied #DEFINE already sits in the objcode as its value.
+            # A name the objcode still carries that the header defines was
+            # compiled without that define; keeping the header would expand
+            # it (oracle round298_staleinclude.json: `x = WAIT_LOC` keeps the
+            # name, the same line under the include compiles the string).
+            stale = (record_names or {}).get(i, set()) & _header_defines(beside)
+            if not stale:
+                continue
+            table._patch_record(i, off, struct.pack("<I", 0))
+            notes.append({"index": i, "action": "clear_includefile",
+                          "header": header,
+                          "intent": "include defines %d name(s) the objcode "
+                                    "references" % len(stale)})
             continue
         table._patch_record(i, off, struct.pack("<I", 0))
         notes.append({"index": i, "action": "clear_includefile",

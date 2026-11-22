@@ -680,9 +680,54 @@ def _prologue_is_ascii_carve(buf: bytes, pos: int, framing: str) -> bool:
     return chunk[0] == 0 or 0x21 <= chunk[0] <= 0x7E
 
 
+# r313-firstsection: the module header says where the first section starts.
+# Its inner part begins at B — module + 41 in a standalone module (an .fxp, an
+# OBJCODE memo, system.app), module + 4 in a program restored from a built EXE
+# or APP (round 307): u16 B counts directory entries, u16 B+2 classes, and
+# u32 B+4 is the offset from B of the first section's prologue. The field reads
+# 37 in every module measured, whatever the code size: 194,689 scored modules
+# of both corpora, round 313's authored cells (u16 and u32 framing), round
+# 307's 9 EXE/APP builds; the section there validates in every one. The byte
+# at B+36 that a u16 reading takes as the first section's marker is the
+# header's last byte (0xfc in most stored records, 0x85 from the oracle guest);
+# a u32 prologue is 00 00 <u32 N>, so its reading's marker sits at B+38.
+FIRST_SECTION_FIELD = 37
+_HEADER_BASES = (4, 41)
+
+
+def _declared_first_section(buf: bytes, off: int, end: int) -> "Section | None":
+    """The first section where the module header puts it (r313-firstsection), else None."""
+    for base in _HEADER_BASES:
+        field_at = off + base + 4
+        if field_at + 4 > end or struct.unpack_from("<I", buf, field_at)[0] \
+                != FIRST_SECTION_FIELD:
+            continue
+        prologue = off + base + FIRST_SECTION_FIELD
+        sec, _ = _try_read_section(buf, prologue - 1, wide=False)
+        if sec is None:
+            sec, _ = _try_read_section(buf, prologue + 1, wide=True)
+        if sec is not None and sec.end + 2 <= end:
+            return sec
+    return None
+
+
 def sections(buf: bytes, off: int = 0, end: int | None = None,
              reject_trace: list | None = None) -> list[Section]:
     """Every code section in [off, end), found by validation rather than by signature.
+
+    r313-firstsection: the section the module header declares first is read where
+    the header puts it, and a candidate ahead of it whose span runs across it is
+    not a section. Header bytes validate that way when the arithmetic lands on a
+    real terminator and swallow the declared section: the guest's ``00 85 03`` at
+    module + 76 (901 bytes to 977) and ``00 00 <u16 39>`` at + 37, u16 39 being a
+    function of header bytes 0-38 alone (round 313 cells a01, b01).
+    r314-nothingahead: no candidate ahead of the declared first section is a
+    section, whether or not its span reaches it. The two that end before it are
+    header fields: an empty u32 section at 9 is u32 9 and u32 13 read as one
+    when u32 13 is 768 (round 61), and an empty u16 section at 40 is the entry
+    and class counts at 41 when both are 3. Round 314's cells move each field
+    with the code fixed (a name one character longer, an empty procedure or
+    class more or less), and the section comes and goes with the field.
 
     ``reject_trace``: optional list collecting ``(candidate_offset, reason)`` for every
     candidate that failed validation. OPT-IN and off by default — the corpus sweeps parse
@@ -709,8 +754,10 @@ def sections(buf: bytes, off: int = 0, end: int | None = None,
     end = len(buf) if end is None else end
     found, pos = [], off + 8
     excl_hi = -1          # exclusive upper bound of the active symbol-table window
+    first = _declared_first_section(buf, off, end)
     while pos < end - 4:
-        sec, reason16 = _try_read_section(buf, pos, wide=False)
+        sec, reason16 = (first, None) if first is not None and pos == first.offset \
+            else _try_read_section(buf, pos, wide=False)
         if sec is None and reject_trace is not None:
             reject_trace.append((pos, reason16))
         if sec is None:
@@ -718,6 +765,14 @@ def sections(buf: bytes, off: int = 0, end: int | None = None,
             if sec is None and reject_trace is not None:
                 reject_trace.append((pos, "u32: " + reason32))
         if sec is not None and sec.end + 2 <= end:
+            if first is not None and pos < first.offset:
+                # r313-firstsection, r314-nothingahead: it sits ahead of the section
+                # the header declares first, so it is header bytes.
+                if reject_trace is not None:
+                    reject_trace.append(
+                        (pos, "ahead of the first section the module header declares"))
+                pos += 1
+                continue
             if pos < excl_hi and _prologue_is_ascii_carve(buf, pos, sec.framing):
                 # THE DISCRIMINATOR: an ASCII-carved anchor inside the preceding
                 # section's symbol table is not a plausible section start.

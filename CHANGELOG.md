@@ -3,6 +3,58 @@
 FoxLift uses Semantic Versioning. Release tags use `vX.Y.Z` and must match the version in
 `pyproject.toml`.
 
+## 0.9.5 — 2026-11-22
+
+Symbol numbering, clause order, class placement and section framing. Each rule was measured
+with authored programs compiled by VFP9 and checked section by section against 0.9.4 on both
+corpora's development and validation splits. The sealed splits were not reopened.
+
+- A SQL SELECT whose clauses the lifter cannot read whole is now refused with `Unsupported`.
+  0.9.4 wrote such a statement without its WHERE, silently dropping the condition. IN-list
+  member references and a parenthesised FROM now decode: on the development and validation
+  splits, 5 statements that 0.9.4 wrote without their WHERE now lift with it.
+- `@o.p` keeps its `@`. 0.9.4 dropped it, so the argument was passed by value; 2 development
+  programs now recompile equal. CREATEOBJECT, NEWOBJECT, EXECSCRIPT and DODEFAULT keep the
+  author's `@`. Of the 440 builtins measured, only ISBLANK, LOOKUP and OBJNUM store their own
+  by-reference flag.
+- `SET SKIP | CARRY | NOCPTRANS | EVENTLIST TO` a name list, a `DO [FORM] … WITH` a `_SCREEN`
+  or `_VFP` property path, and call chains with arguments on inner links (also as a WITH-scoped
+  assignment target) now lift instead of being refused.
+- VFP9 numbers each name where the source first writes it, so the symbol table records the
+  source's clause order. The lifter now reads it for:
+  - SQL INTO ahead of FROM, ahead of ORDER BY or ahead of a WHERE subquery;
+  - ORDER BY or WHERE ahead of FROM, and ORDER BY ahead of WHERE when the two share a name;
+  - scope words (ALL, REST, NEXT, FOR, IN, NOOPTIMIZE, WHILE) placed against REPLACE's and
+    DELETE's fields, including words an earlier statement already numbered;
+  - SCAN WHILE ahead of FOR, SELECT ALL, aggregate DISTINCT, and DO FORM's NAME against TO
+    and WITH.
+
+  String literals, quoted or bracketed FROM tables, and a FOR condition that opens with a
+  parenthesis number no entry. A bracketed CREATE field type is written in brackets, and
+  `SELECT TOP n PERCENT` keeps its PERCENT.
+- DEFINE CLASS is placed where its registration indices say, in standalone programs and inside
+  built EXE and APP files. A folded constant power lifts as `v^1`, and a parenthesised integer
+  from 128 to 255 keeps its parentheses. Together: 6 development programs move, 5 of them to
+  equal. Class-init properties and methods lift in stored order.
+- A WITH link closed by `e5` is the receiver of the hops behind it. A quoted CREATE field type
+  keeps its bytes. A symbol table that also reads as an empty section is no longer a class
+  member. Together: 9 table sections and 1 program now recompile equal.
+- `LINENO()` inside a string, EVALUATE, macro or TEXT body is not a stored line number, and
+  mixed file and body folds are placed. 4 development modules move. One program recompiles
+  equal whole, and the program 0.9.4 padded to 162,137 lines lifts to 10,516.
+- The module header declares where the first code section starts; the u32 four bytes into the
+  inner header reads 37 in every module measured. Nothing ahead of that offset is read as a
+  section any more.
+  - Header bytes that validated as a section across the first one swallowed it: 2 development
+    form sections now recompile equal.
+  - Header fields that validated as an empty section (a directory or class count of 3, a
+    length field of 768) reframe 21 modules. One of them moves text, and it recompiles equal.
+  - Counts that included those empty sections drop by them: corpus-1 program sections 1,051
+    to 1,050.
+- Every development or validation table file whose lifted text changed was recompiled on VFP9
+  for each rule: 358 sections recompile equal that did not, 0 broken. None of these changes
+  moves a program of the authored population.
+
 ## 0.9.4 — 2026-10-21
 
 Line numbers and SQL clause order. Each rule was measured with authored programs compiled

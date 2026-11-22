@@ -122,9 +122,13 @@ destroys minimal-pair diffs. `corpus.py` names everything `s%04d.prg` for this r
 **Quoting through ssh → cmd → PowerShell.** Base64-UTF16LE the script and use
 `powershell -EncodedCommand`. `oracle.powershell()` does this.
 
-**GBK unquoted identifiers need the guest ACP to be 936.** `SET CODEPAGE TO 936`,
-`SET CPCOMPILE TO 936`, and `COMPILE AS 936` do not parse DBCS identifiers while
-the OS ANSI code page is 1252 (measured in probes/codepage/). The guest system locale
+**GBK unquoted identifiers need the guest ACP to be 936.** Under ACP 1252 they do not
+compile. `SET CODEPAGE TO` is not a command in this build, `COMPILE FORM ... AS` is
+rejected, and on the 936 guest `SET CPCOMPILE TO 1252` and `COMPILE ... AS 1252` still
+refuse a cp1252 high byte before a closing quote or comma (round 299). Whether
+`SET CPCOMPILE TO 936` or `COMPILE ... AS 936` would let a 1252 guest parse GBK
+identifiers is not measured: `probes/codepage/` never sent its SET lines to the driver.
+The guest system locale
 is set with `Set-WinSystemLocale zh-CN` (ACP/OEMCP registry 936, reboot), and with
 that unquoted GBK identifiers compile. `Language.Basic~~~zh-CN` is installed;
 `Install-Language zh-CN` as a full pack was only partial and is not required

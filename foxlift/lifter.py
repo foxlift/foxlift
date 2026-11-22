@@ -1,6 +1,7 @@
 # ABOUTME: The thin lifter: schema-driven RPN -> AST -> canonical VFP text, exact inverse shapes.
 # ABOUTME: Verbatim families (01 macro / b4 rejected line) pass through as their stored text.
 
+import bisect as _bisect
 import contextlib as _contextlib
 import struct as _struct
 import math as _math
@@ -12,6 +13,7 @@ from foxlift import fold_preimages, productions, schemas as S
 from foxlift.container import (
     PROLOGUE_BASE, PROLOGUE_U16, PROLOGUE_U32, class_identities,
     class_init_offsets, procedure_directory, procedure_names, _method_names,
+    _ident_bytes, _skip_symbol_table,
 )
 
 S.FC = 0xFC
@@ -284,6 +286,15 @@ class MemberPath:
 
 
 @dataclass
+class ByrefMemberPath(MemberPath):
+    """r304-byrefpath: a two-hop member path argument whose push rode the
+    0x18 flag slot — '18 f4 <o> f7 <p>' (oracle round304_cells c01/c09).
+    Renders '@o.p' in a user or method call and in a pass-through builtin
+    (CREATEOBJECT, round307_cells c05), and bare as an argument of a builtin
+    that stores the flag itself (LOOKUP, c22; r307-ownflag)."""
+
+
+@dataclass
 class MethodCall:
     """A 43-group whose callee is an object path terminating in f6:
     MethodCall(['THIS','Parent','grid1'], 'DoScroll', [args]) -> THIS.Parent.grid1.DoScroll(6).
@@ -406,6 +417,7 @@ class DoStmt:
     flags: list = field(default_factory=list)
     with_first: bool = False  # r89-dowith: author spelled WITH before TO
     with_before_in: bool = False  # r272-order: author spelled WITH before IN
+    name_slot: int = 0  # r310-nameorder: TO / WITH clauses written ahead of NAME
 
 
 @dataclass
@@ -673,6 +685,7 @@ class DeleteFor:
     gfxnorender s1 stmt61) — the same statement-final ALL byte REPLACE uses."""
     cond: object
     all_scope: bool = False
+    bracket_word: object = None   # r308-bracketword: the condition's lead string is bracketed
 
 
 @dataclass
@@ -710,6 +723,8 @@ class DeleteScopeStmt:
     nooptimize: bool = False
     recycle: bool = False      # FILE's trailing RECYCLE (r99-delete)
     in_before_all: bool = False  # r272-order: author spelled IN before ALL
+    bracket_word: object = None  # r308-bracketword: the condition's lead string is bracketed
+    while_bracket: object = None  # r312-bracketwhile: the WHILE condition's lead string is bracketed
 
 
 @dataclass
@@ -1496,6 +1511,7 @@ class ScanStmt:
     scope_word: str = ""       # REST | NEXT | RECORD ("" when none or ALL)
     scope_expr: object = None  # the count/record number NEXT and RECORD take
     nooptimize: bool = False
+    while_first: bool = False  # r305-scanwhile: the source wrote WHILE before FOR
 
 
 @dataclass
@@ -1691,6 +1707,13 @@ class ReplaceStmt:
     for_before_all: bool = False  # r273-fororder: the source wrote FOR before ALL
     in_before_for: bool = False   # r273-inorder: the source wrote IN before FOR
     noopt_first: bool = False     # r282-replacescope: NOOPTIMIZE precedes the ALL it carries
+    noopt_after_for: bool = False  # r308-nooptfor: the source wrote FOR ahead of NOOPTIMIZE
+    in_before_all: bool = False   # r298-replaceinall: the source wrote IN before a trailing ALL
+    for_ahead: bool = False       # r305-forahead: the source wrote FOR ahead of the fields
+    fields_lo: object = None      # r308-forahead: lowest new name the field list resolves
+    for_ahead_first: object = None  # r312-forscope: the word numbered first behind a FOR-ahead field list
+    for_bracket: bool = False     # r312-bracketfor: the FOR condition's lead string is bracketed
+    in_ahead: object = None       # r312-inahead: IN stood ahead of the fields: "lead", "before_all" or "for"
 
 
 @dataclass
@@ -1963,6 +1986,7 @@ class DefineStmt:
     message: object = None
     key: object = None              # (key text, label expression or None)
     pictres: object = None          # PICTRES system-bar name or expression
+    picture_first: bool = False     # r303-barpicture: PICTURE written before PROMPT
     neighbour: object = None        # BEFORE/AFTER neighbour bar (r49-residual)
     neighbour_word: str | None = None
     mark: object = None             # PAD: MARK <expr> (r43-pad)
@@ -2092,6 +2116,7 @@ class CreateCursor:
     clauses: dict = field(default_factory=dict)  # the statement's own clauses
     table: bool = False           # True when second byte is 0x31 (CREATE TABLE);
                                   # False when 0xBD (CREATE CURSOR)
+    type_word: object = None      # r312-brackettype: the bracketed type the table numbers
 
     @property
     def codepage(self):
@@ -2413,6 +2438,16 @@ _SYM_SEEN = []
 # (an INTO CURSOR name, a FROM name). Such an entry has no operand, so it never raises
 # _SYM_TABLE_HI, yet the earlier statement numbered it. None outside a section walk.
 _SYM_SPELLED = None
+# r305b-literalname: (id(stream), offset) of each string token the statement in
+# progress decoded as an expression literal. A literal numbers nothing: only a
+# string the grammar reads as a name (FROM, INTO, USE, ...) is spelled. None
+# outside a statement decode.
+_EXPR_STR_AT = None
+# r305-scopeclaim: indexes of the table-only scope words (ALL, IN, FOR, ...) that
+# an earlier statement's emitted REPLACE or DELETE interns. Such an entry has no
+# operand, so it never raises _SYM_TABLE_HI, yet the earlier statement numbered
+# it. None outside a section walk.
+_SYM_CLAIMED = None
 
 
 class _sym_tap:
@@ -2489,14 +2524,26 @@ def _introduced(idxs, already, hi):
     return out
 
 
-def _spelled_names(buf):
-    """Casefolded text of each string token in one statement stream (r293-intoorder)."""
+def _spelled_names(buf, literals=frozenset()):
+    """Casefolded text of each string token in one statement stream (r293-intoorder).
+
+    r305b-literalname: a token at an offset in ``literals`` was decoded as an
+    expression literal; the compiler numbers no entry for it, so it is skipped.
+
+    r312-scanstep: a d9/fb byte whose length runs past the statement is the
+    operand byte it is, not a string (the integer 2009 is `f9 04 d9 07`, oracle
+    round 308 f29; builtin 0xd9 is `ea d9`), so the scan steps over it and goes
+    on. Skipping the rest of the statement there hid the strings behind it in
+    597 statements of both corpora's scored splits (round312_task0.json)."""
     names = set()
     i, n = 0, len(buf)
     while i + 3 <= n:
         if buf[i] in (S.STR, S.STR2):
             ln = S.u16(buf, i + 1)
-            if i + 3 + ln <= n:
+            if i + 3 + ln > n:
+                i += 1
+                continue
+            if (id(buf), i) not in literals:
                 names.add(buf[i + 3:i + 3 + ln].decode("latin1").casefold())
             i += 3 + ln
             continue
@@ -2504,7 +2551,7 @@ def _spelled_names(buf):
     return names
 
 
-def _spelled_earlier(syms, idx) -> bool:
+def _spelled_earlier(syms, idx, literals=False) -> bool:
     """Did an earlier statement of the section spell the entry at idx as a string?
 
     The entry was numbered by that statement, so it is not new to this one. The
@@ -2513,7 +2560,263 @@ def _spelled_earlier(syms, idx) -> bool:
     if _SYM_SPELLED is None or idx is None or not 0 <= idx < len(syms):
         return False
     name = syms[idx]
-    return isinstance(name, str) and name.casefold() in _SYM_SPELLED
+    if not isinstance(name, str):
+        return False
+    # r305b-literalname: ``literals`` also counts a text an earlier statement held
+    # only as an expression literal (kept as ("literal", text)): main's reading,
+    # for the placements the table cannot decide.
+    return name.casefold() in _SYM_SPELLED or (
+        literals and ("literal", name.casefold()) in _SYM_SPELLED)
+
+
+def _unclaimed_new_index(syms, name):
+    """r305-scopeclaim: `_table_new_index`, with a scope word an earlier
+    statement's emitted REPLACE or DELETE interned read as old."""
+    i = _table_new_index(syms, name)
+    return None if i is not None and _claimed_earlier(i) else i
+
+
+def _claimed_earlier(idx) -> bool:
+    """r305-scopeclaim: did an earlier statement's emitted text intern this scope word?"""
+    return _SYM_CLAIMED is not None and idx in _SYM_CLAIMED
+
+
+def _scope_slot() -> int:
+    """r305-scopeclaim: the first table slot no earlier statement numbered.
+
+    The high-water counts operands only; a scope word an earlier REPLACE or
+    DELETE interned sits above it (oracle round 305 c01-c08: with no new name
+    in the window, `DELETE ALL FOR ... IN t`, `REPLACE f WITH v IN t ALL` and
+    `REPLACE f WITH v FOR c ALL IN t` intern ALL, IN and FOR in turn)."""
+    slot = max(_SYM_TABLE_HI, _SYM_STMT_HI) + 1
+    while _claimed_earlier(slot):
+        slot += 1
+    return slot
+
+
+def _scope_words(ast):
+    """r305-scopeclaim: the scope words an emitted REPLACE or DELETE interns.
+
+    REPLACE interns ALL (or REST) and FOR written ahead of its fields, and the
+    first scope word written after them (round 303 `p_R*`, `b01`-`b08`); a
+    DELETE interns its first scope word (round 303 `cap_delete_scope`). The
+    order is the one `_emit` writes. A parenthesised IN and words whose
+    interning is not measured (ADDITIVE, DELETE WHILE) claim nothing."""
+    words = []
+    if isinstance(ast, ReplaceStmt):
+        if ast.all_first:
+            words.append("ALL" if ast.all_scope else "REST")
+        if getattr(ast, "for_ahead", False):
+            words.append("FOR")
+        all_after = ast.all_scope and not ast.all_first
+        scope_after = ast.scope_word is not None and not (
+            ast.all_first and not ast.all_scope)
+        # r312-inahead: an IN written ahead of the fields interns nothing
+        plain_in = isinstance(ast.in_spec, str) and not getattr(ast, "in_ahead", None)
+        if getattr(ast, "for_ahead", False):
+            first = getattr(ast, "for_ahead_first", None) or ("IN" if plain_in else None)
+        elif ast.for_cond is not None and ast.for_before_all:
+            first = "FOR"
+        elif ast.for_cond is not None and ast.in_before_for:
+            first = "IN"
+        elif getattr(ast, "for_bracket", False):
+            first = None    # r312-bracketfor: a bracket-led FOR numbers nothing
+        elif getattr(ast, "noopt_after_for", False):
+            first = "FOR"
+        elif ast.noopt_first:
+            first = "NOOPTIMIZE"
+        elif all_after and not ast.in_before_all:
+            first = "ALL"
+        elif ast.nooptimize:
+            first = "NOOPTIMIZE"
+        elif ast.additive:
+            first = None
+        elif scope_after:
+            first = ast.scope_word
+        elif ast.for_cond is not None:
+            first = "FOR"
+        elif ast.while_cond is not None:
+            first = "WHILE"
+        else:
+            first = "IN" if plain_in else None
+        if first:
+            words.append(first)
+    elif isinstance(ast, DeleteFor):
+        if getattr(ast, "bracket_word", None) is not None:
+            # r308-bracketword: the bracketed lead string's word took FOR's place
+            # (r312-bracketdot: a dotted run's names, a tuple)
+            if isinstance(ast.bracket_word, tuple):
+                words.extend(ast.bracket_word)
+            elif ast.bracket_word:
+                words.append(ast.bracket_word)
+        else:
+            words.append("ALL" if ast.all_scope else "FOR")
+    elif isinstance(ast, CreateCursor) and ast.type_word:
+        # r312-brackettype: the bracketed type word is an entry with no operand
+        words.append(ast.type_word)
+    elif isinstance(ast, DeleteScopeStmt) and ast.kind not in ("FILE", "VIEW"):
+        if getattr(ast, "bracket_word", None) is not None:
+            if isinstance(ast.bracket_word, tuple):
+                words.extend(ast.bracket_word)
+            elif ast.bracket_word:
+                words.append(ast.bracket_word)
+        elif (ast.in_before_all and ast.alias is not None and ast.kind == "ALL"
+                and ast.cond is not None):
+            words.append("IN")
+        elif ast.kind:
+            words.append(ast.kind)
+        elif ast.cond is not None:
+            words.append("FOR")
+        elif ast.while_cond is None and ast.alias is not None:
+            words.append("IN")
+        if getattr(ast, "while_bracket", None):
+            # r312-bracketwhile: the bracketed WHILE lead's names (WHILE
+            # itself stays unclaimed, as before)
+            words.extend(ast.while_bracket)
+    return words
+
+
+def _lead_str(cond):
+    """The string literal that opens a condition's text, or None."""
+    node = cond
+    while isinstance(node, (Bin, ShortCircuit)):
+        node = node.l
+    if not isinstance(node, Str) or node.dq or not node.text \
+            or "[" in node.text or "]" in node.text:
+        return None
+    return node if _emit(cond).startswith(_emit(node)) else None
+
+
+def _delete_bracket_word(syms, cond):
+    """r308-bracketword: did the source write DELETE FOR's lead string in brackets?
+
+    Oracle round 308 q03-q35: `DELETE FOR [Qz heat] $ qb` interns QZ, the
+    string's lead word, in FOR's place and no FOR; `'Qz heat'` and `"Qz heat"`
+    intern FOR (q12, q13, q34). The word is the first name after any spaces
+    (q18); a digit interns nothing (q17), and an old word adds nothing (q27).
+    Only with FOR as the first scope word: `DELETE ALL FOR [..]` interns ALL
+    alone (q16), `FOR NOT [..]` and `FOR ([..])` are not a lead string (q32,
+    q15). Returns the word the bracketed spelling interns ("" for none), or
+    None to keep the quotes: when FOR is this statement's entry, when the word
+    is FOR itself (q25), or when the word is new
+    elsewhere in the table. With neither entry this statement's, brackets are
+    written only where the table has no FOR at all, which a quoted spelling
+    would have added. A dotted word (q19, two names) is r312-bracketrun's.
+    """
+    if _SYM_TABLE_HI is None:
+        return None
+    lead = _lead_str(cond)
+    if lead is None:
+        return None
+    m = _re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)", lead.text)
+    word = m.group(1).upper() if m else None
+    if m is not None and lead.text[m.end():m.end() + 1] == ".":
+        return _delete_bracket_run(syms, lead.text)
+    slot = _SYM_TABLE_HI + 1
+    while _spelled_earlier(syms, slot) or _claimed_earlier(slot):
+        slot += 1
+    if _unclaimed_new_index(syms, "FOR") == slot or word == "FOR":
+        return None
+    if word is not None:
+        w = _table_new_index(syms, word)
+        if w is not None and not _claimed_earlier(w) \
+                and not _spelled_earlier(syms, w):
+            if w == slot and (_SYM_STMT_LO is None or w < _SYM_STMT_LO):
+                return word
+            return None
+    if any(isinstance(x, str) and x.upper() == "FOR" for x in syms):
+        return None
+    if word is not None and word not in {x.upper() for x in syms if isinstance(x, str)}:
+        return None
+    return ""
+
+
+def _delete_bracket_run(syms, text, slot=None):
+    """r312-bracketdot: the entries a bracketed dotted lead numbers in FOR's place.
+
+    Oracle round 312 qd01-qd12 (round 308 q19): `DELETE FOR [Qz.heat] $ qb`
+    numbers QZ and HEAT, the names of the dotted run, and no FOR; the run ends
+    at the first character that is neither a name nor a dot followed by one
+    (qd04 `qz.heat qy`, qd05 `qz.`, qd06 `qz.1`), an `m.` ahead of it is the
+    memvar scope and numbers nothing (qd07), and a name numbers once (qd10).
+    So the run's new names, in order, standing in the first free slots, say
+    the brackets; an old name adds nothing (qd09, qd11). Returns the tuple of
+    names, or None to keep the quotes (FOR this statement's, FOR in the run,
+    or a new name of the run elsewhere). r312-bracketwhile passes the slot
+    behind WHILE."""
+    m = _re.match(r"\s*((?:m\.)?)([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)",
+                  text, _re.IGNORECASE)
+    if m is None:
+        return None
+    run = []
+    for w in m.group(2).upper().split("."):
+        if w not in run:
+            run.append(w)
+    if "FOR" in run:
+        return None
+
+    def free(i):
+        while _spelled_earlier(syms, i) or _claimed_earlier(i):
+            i += 1
+        return i
+
+    if slot is None:
+        slot = free(_SYM_TABLE_HI + 1)
+        if _unclaimed_new_index(syms, "FOR") == slot:
+            return None
+    have = {x.upper() for x in syms if isinstance(x, str)}
+    new = []
+    for w in run:
+        if w not in have:
+            return None
+        i = _table_new_index(syms, w)
+        if i is None or _spelled_earlier(syms, i) or _claimed_earlier(i):
+            continue
+        if i != slot:
+            return None
+        new.append(w)
+        slot = free(slot + 1)
+    if not new or (_SYM_STMT_LO is not None
+                   and _table_new_index(syms, new[-1]) > _SYM_STMT_LO):
+        return None
+    return tuple(new)
+
+
+def _delete_while_bracket(syms, cond):
+    """r312-bracketwhile: the entries a bracketed lead string of DELETE WHILE numbers.
+
+    Oracle round 312 qw01-qw11 (round 308 q36): `DELETE WHILE [Qz heat] $ qb`
+    numbers WHILE and then QZ, the string's lead name (a dotted run: its
+    names, qw02); `'qz'` and `"qz"` number WHILE alone (qw03, qw11). So a
+    WHILE of this statement in the first free slot with the run's new names
+    right behind it says the brackets; an old lead name is a tie (qw08).
+    Only WHILE as the statement's one clause is read: behind FOR (qw04), REST
+    (qw06) or NEXT (qw07) the table holds neither, and WHILE ahead of FOR
+    (qw05) is not read. Returns the tuple of names, or None."""
+    if _SYM_TABLE_HI is None:
+        return None
+    lead = _lead_str(cond)
+    if lead is None:
+        return None
+    slot = _SYM_TABLE_HI + 1
+    while _spelled_earlier(syms, slot) or _claimed_earlier(slot):
+        slot += 1
+    if _unclaimed_new_index(syms, "WHILE") != slot:
+        return None
+    slot += 1
+    while _spelled_earlier(syms, slot) or _claimed_earlier(slot):
+        slot += 1
+    return _delete_bracket_run(syms, lead.text, slot)
+
+
+def _claim_scope_words(syms, ast) -> None:
+    """r305-scopeclaim: record the table slots this statement's scope words take."""
+    if _SYM_CLAIMED is None:
+        return
+    for w in _scope_words(ast):
+        hits = [i for i, x in enumerate(syms) if isinstance(x, str) and x.upper() == w]
+        if len(hits) == 1:
+            _SYM_CLAIMED.add(hits[0])
 
 
 def _unspelled(syms, idxs):
@@ -2567,7 +2870,21 @@ def _order_written_first(where_idxs, where_already, order_idxs, order_already,
     order_new = _introduced(order_idxs, order_already, _SYM_TABLE_HI)
     if not where_new or not order_new:
         return False
-    return max(order_new) < min(where_new)
+    if max(order_new) < min(where_new):
+        return True
+    # r311-ordershared: a name both clauses spell is numbered where the clause
+    # written first spells it (oracle round 311 o01, o08, o10, o15: `ORDER BY
+    # qa, qb, qc WHERE a.qa = qd AND a.qe != 'x'` stores QA QB QC QE; the
+    # WHERE-first twins o02, o09, o11 store QA QE QB QC). The wire decodes WHERE
+    # first, so such a name sits in where_new and never in order_new. ORDER BY
+    # came first when WHERE-first numbering is ruled out and every name ORDER
+    # BY spells stands below the names only WHERE spells.
+    if max(where_new) < min(order_new):
+        return False
+    shared = set(order_idxs)
+    where_only = [i for i in where_new if i not in shared]
+    ahead = [i for i in where_new if i in shared] + order_new
+    return not where_only or max(ahead) < min(where_only)
 
 
 def _into_clause_split(into_idx, clauses):
@@ -2615,12 +2932,21 @@ def _replace_all_first(syms, all_scope, in_spec, for_cond, *, word="ALL",
     i = _table_new_index(syms, word)
     if i is None:
         return False
-    f = _table_new_index(syms, "FOR")
+    # r308-inclaim: a FOR an earlier statement interned is not this one's
+    # (oracle round 308 n14, n17)
+    f = _unclaimed_new_index(syms, "FOR")
     if f is not None:
         if cond_lo is not None:
             counted = f < cond_lo
         else:
             slot = max(_SYM_TABLE_HI, _SYM_STMT_HI) + 1
+            # r303-adjslot: an entry an earlier statement spelled as a string
+            # sits above the high-water yet is not this statement's, so the
+            # slot is the first entry above it no earlier statement numbered
+            # (oracle round 303 `a01_spelled_then_all_first`); r305-scopeclaim:
+            # so does a scope word an earlier statement interned (c05).
+            while _spelled_earlier(syms, slot) or _claimed_earlier(slot):
+                slot += 1
             # r285-replaceadjacent: with no new operand name, ALL-first interns
             # ALL at the slot above the section's high-water and FOR at ALL+1
             # (oracle round-285 `adj_program`, `sp_all_first`: FA FB ALL FOR X).
@@ -2634,9 +2960,70 @@ def _replace_all_first(syms, all_scope, in_spec, for_cond, *, word="ALL",
                 word == "ALL" and field_lo is None and i == slot and f == slot + 1)
         if counted:
             return i < f
-    if not any(w in syms for w in ("FOR", "IN", "NOOPTIMIZE", "WHILE")):
+    if not any(w in syms for w in ("FOR", "IN", "NOOPTIMIZE", "WHILE")) \
+            and not _opens_with_paren(for_cond) and _lead_str(for_cond) is None:
+        # r311-parenfor: a FOR condition that opens with a parenthesised group
+        # interns no FOR (oracle round 311 r01-r03, r05, r10: `REPLACE ALL qa
+        # WITH 1 FOR (qb + qc) > 0` stores ALL QA QB QC, r19 REST QA QB QC;
+        # r04 and r08, with no parenthesis, store ALL QA FOR ...), so there a
+        # missing FOR does not rule out the scope word written ahead of the fields.
         return False
     return field_lo is not None and i < field_lo
+
+
+def _opens_with_paren(cond) -> bool:
+    """r311-parenfor: does the condition's text open with a parenthesised group?"""
+    node = cond
+    while isinstance(node, (Bin, ShortCircuit)):
+        node = node.l
+    return isinstance(node, Paren)
+
+
+def _replace_noopt_after_for(syms, *, nooptimize, all_scope, all_first,
+                             scope_word, while_cond, additive) -> bool:
+    """r308-nooptfor: FOR, not NOOPTIMIZE, is the first word after the field list.
+
+    Oracle round 308 n01-n13 (and round 223's `q_for_noopt`): every order of
+    FOR, ALL and NOOPTIMIZE behind the fields stores the one `fd 30 [03] 13`
+    frame, and the table interns the first of them, as round 282 measured for
+    ALL and FOR. `REPLACE ALL f WITH v FOR c NOOPTIMIZE` interns ALL, F, FOR;
+    `f WITH v FOR c NOOPTIMIZE` interns F, FOR; `f WITH v FOR c ALL
+    NOOPTIMIZE` interns F, FOR. So a FOR this statement interned, with no
+    NOOPTIMIZE of its own and no ALL of its own behind the fields, says FOR
+    was written first. The FOR must sit at most one slot past everything this
+    statement and the earlier ones resolved, an ALL written ahead of the
+    fields included (r281's bound), and a word an earlier statement claimed
+    is not this one's (n15: an earlier NOOPTIMIZE).
+    """
+    if not nooptimize or additive or scope_word is not None or while_cond is not None:
+        return False
+    if _SYM_CLAIMED is None:
+        # outside a section walk, or r305-scopeclaim's claim-blind pass, which
+        # reads the statement as main does
+        return False
+    if _unclaimed_new_index(syms, "NOOPTIMIZE") is not None:
+        return False
+    if all_scope and not all_first and _unclaimed_new_index(syms, "ALL") is not None:
+        return False
+    f = _unclaimed_new_index(syms, "FOR")
+    if f is None:
+        # r312-allahead: with no NOOPTIMIZE entry, and no ALL behind the fields
+        # or none numbered, the first word behind them is a FOR an earlier
+        # statement numbered (oracle round 312 rc01, rc05 = round 308 n14: ALL,
+        # QC, and no entry for the trailing `FOR c NOOPTIMIZE`; rc09 after a
+        # DELETE FOR; rc10 `FOR c ALL NOOPTIMIZE` with no ALL entry; rc11
+        # without ALL)
+        return bool((not all_scope or all_first or "ALL" not in syms)
+                    and "FOR" in syms and "NOOPTIMIZE" not in syms)
+    hi = max(_SYM_TABLE_HI, _SYM_STMT_HI)
+    if all_scope and all_first:
+        a = _unclaimed_new_index(syms, "ALL")
+        if a is not None:
+            hi = max(hi, a)
+    slot = hi + 1
+    while _claimed_earlier(slot):
+        slot += 1
+    return f <= slot
 
 
 def _replace_noopt_first(syms, nooptimize, all_scope, all_first) -> bool:
@@ -2657,9 +3044,9 @@ def _replace_tail(ast) -> str:
     if getattr(ast, "while_cond", None) is not None:
         text += " WHILE " + _emit(ast.while_cond)
     spec = getattr(ast, "in_spec", None)
-    if spec is not None:
+    if spec is not None and not getattr(ast, "in_ahead", None):   # r312-inahead
         if isinstance(spec, tuple):
-            text += " IN (" + _emit(spec[1]) + ")"
+            text += " IN " + spec[0] + _emit(spec[1]) + spec[2]
         else:
             text += " IN " + str(spec)
     return text
@@ -2699,11 +3086,12 @@ def _replace_for_before_all(syms, all_scope, for_cond, *,
     if nooptimize or additive or scope_word not in (None, "REST"):
         return False
     for_new = _table_new_index(syms, "FOR")
-    word_new = _table_new_index(syms, word)
+    word_new = _unclaimed_new_index(syms, word)
     if for_new is not None and word_new is None:
         if word not in syms:
             return True
-        return for_new <= max(_SYM_TABLE_HI, _SYM_STMT_HI) + 1
+        # r305-scopeclaim: slots earlier statements' scope words took are numbered
+        return for_new <= _scope_slot()
     if for_new is None and word_new is None:
         return _keyword_once(syms, "FOR") and not _keyword_once(syms, word)
     return False
@@ -2730,8 +3118,12 @@ def _replace_in_before_for(syms, for_cond, in_spec, *,
         return False
     if nooptimize or additive or scope_word is not None or while_cond is not None:
         return False
-    in_new = _table_new_index(syms, "IN")
-    for_new = _table_new_index(syms, "FOR")
+    # r308-inclaim: an IN or FOR an earlier REPLACE or DELETE interned is not
+    # this statement's (oracle round 308 c06, c19: after `REPLACE f WITH v IN
+    # t`, `REPLACE f WITH 0 ALL FOR c IN t` interns ALL and the claimed IN
+    # nothing; c34: a claimed FOR leaves the IN-first table).
+    in_new = _unclaimed_new_index(syms, "IN")
+    for_new = _unclaimed_new_index(syms, "FOR")
     if in_new is not None and for_new is None:
         return True
     if in_new is None and for_new is None:
@@ -2739,6 +3131,358 @@ def _replace_in_before_for(syms, for_cond, in_spec, *,
             return False
         return _keyword_once(syms, "IN") and not _keyword_once(syms, "FOR")
     return False
+
+
+def _replace_in_before_all(syms, ast) -> bool:
+    """r298-replaceinall: did the source write IN <alias> ahead of a trailing ALL?
+
+    Oracle round298_sqltrail.json cells a03 and a05: `REPLACE fa WITH 1 ALL IN
+    tbx` and `REPLACE fa WITH 1 IN tbx ALL` compile to the same frame; the
+    first interns ALL and not IN, the second IN and not ALL. The word written
+    straight after the WITH group is the one interned, so a new IN in this
+    statement's slot with no new ALL says IN came first. The slot test is
+    r273's one-slot margin over the high-water, which keeps an IN a later
+    statement interned out. FOR, WHILE, NOOPTIMIZE, ADDITIVE, REST/NEXT, a
+    parenthesised IN and an ALL ahead of the fields keep the default order.
+    """
+    if not ast.all_scope or ast.all_first or ast.for_cond is not None:
+        return False
+    spec = ast.in_spec
+    if spec is None or isinstance(spec, tuple):
+        return False
+    if ast.nooptimize or ast.additive or ast.scope_word is not None \
+            or ast.while_cond is not None:
+        return False
+    in_new = _table_new_index(syms, "IN")
+    if in_new is None or _unclaimed_new_index(syms, "ALL") is not None:
+        return False
+    # r305-scopeclaim: slots earlier statements' scope words took are numbered
+    return in_new <= _scope_slot()
+
+
+def _replace_all_noopt_ahead(syms, ast) -> bool:
+    """r312-allnoopt: did the source write ALL ahead of fields it does not
+    introduce, with NOOPTIMIZE the first word behind them?
+
+    Oracle round 312 rn01, rn04, rn12 (round 308 n12, n07): with the fields'
+    names old, `REPLACE ALL f WITH v NOOPTIMIZE [FOR c] [IN t]` numbers ALL and
+    then NOOPTIMIZE, while written behind the fields the table keeps only the
+    first of the two (rn02 interns ALL, rn03 NOOPTIMIZE; round 282). So ALL in
+    the first slot no earlier statement numbered and NOOPTIMIZE in the next
+    say ALL stood ahead. A new field between them is read by the stock arms
+    (rn07). REST, WHILE, ADDITIVE and NEXT keep main's text."""
+    if not (ast.all_scope and ast.nooptimize) or ast.all_first or ast.additive \
+            or ast.scope_word is not None or ast.while_cond is not None:
+        return False
+    if _SYM_CLAIMED is None or _SYM_TABLE_HI is None:
+        # r305-scopeclaim's claim-blind pass reads the statement as main does
+        return False
+    a = _unclaimed_new_index(syms, "ALL")
+    n = _unclaimed_new_index(syms, "NOOPTIMIZE")
+    if a is None or n is None:
+        return False
+    slot = _SYM_TABLE_HI + 1
+    while _spelled_earlier(syms, slot) or _claimed_earlier(slot):
+        slot += 1
+    if a != slot:
+        return False
+    nxt = a + 1
+    while _spelled_earlier(syms, nxt) or _claimed_earlier(nxt):
+        nxt += 1
+    return n == nxt
+
+
+def _replace_for_bracket(syms, ast) -> bool:
+    """r312-bracketfor: did the source write REPLACE's FOR lead string in brackets?
+
+    Oracle round 312 qr01-qr15 (round 308 q22): `REPLACE qa WITH 1 FOR [Qz
+    heat] $ qb` numbers neither FOR nor the string's lead word (QA QB), where
+    `'qz'` and `"qz"` number FOR (qr09, qr10). So with FOR the first word
+    behind the fields and no FOR entry in the table, the lead string was
+    bracketed; an IN or a NOOPTIMIZE behind it is not numbered either (qr08,
+    qr11), and ALL ahead of the fields stands below them (qr04;
+    `_replace_all_first` no longer reads the missing FOR against it). A FOR an
+    earlier statement numbered is a tie (qr13), and so is ALL behind the
+    fields (qr05). FOR ahead of the fields (qr06) and WHILE (qr07) keep main's
+    text."""
+    if ast.for_cond is None or _SYM_TABLE_HI is None or "FOR" in syms:
+        return False
+    if (ast.all_scope and not ast.all_first) or ast.additive \
+            or ast.scope_word is not None or ast.while_cond is not None \
+            or ast.for_before_all or ast.in_before_for or ast.noopt_first:
+        return False
+    if ast.nooptimize and "NOOPTIMIZE" in syms:
+        return False
+    if ast.in_spec is not None and not isinstance(ast.in_spec, str):
+        return False
+    return _lead_str(ast.for_cond) is not None
+
+
+def _emit_replace_for(ast):
+    """REPLACE's FOR condition, its lead string bracketed where r312-bracketfor read it so."""
+    if getattr(ast, "for_bracket", False):
+        return _emit_bracket_lead(ast.for_cond)
+    return _emit(ast.for_cond)
+
+
+def _replace_in_ahead(syms, ast, seen):
+    """r312-inahead: did the source write REPLACE's IN clause ahead of the fields?
+
+    Oracle round 312 ri01-ri17 (round 303 b04: `REPLACE FOR qb = 1 IN qc qa
+    WITH 1` stores FOR QB QC QA). The wire keeps the alias ahead of the
+    fields wherever the source wrote IN; the table numbers the alias at its
+    source position, and IN only when IN is the first word behind the fields
+    (ri07: `qa WITH 1 IN qc` holds QA IN QC). So a new alias below the
+    fields' first new name, with no IN of this statement in the table, says
+    IN stood ahead of them (ri02, ri03, ri09, ri10); so does a table with no
+    IN where the reading would intern it first behind the fields (ri06,
+    ri14: the alias an earlier statement numbered; ri15: the fields old).
+    ALL numbered below the alias stood ahead of it (ri05), an ALL ahead of
+    the fields numbered above it stood behind it (ri21, round 303 b01:
+    `REPLACE IN qc ALL qa WITH 0 FOR qb < 0` numbers QC, ALL, QA), a FOR of this
+    statement between the alias and the fields stood between them (ri04),
+    and a FOR ahead below the alias leads it (ri01, ri14). An alias numbered
+    behind the fields keeps main's text (ri16, ri17), and so does one the
+    statement spells again behind an IN an earlier statement numbered (ri18),
+    or with another word first behind the fields (ri13: ALL), and WHILE,
+    NOOPTIMIZE, ADDITIVE, REST/NEXT and a parenthesised or string IN, which
+    are not measured. Returns "lead" (IN ahead of the fields, behind an ALL
+    there), "before_all" (IN ahead of an ALL ahead of the fields), "for" (IN
+    behind a FOR ahead of the fields) or None."""
+    spec = ast.in_spec
+    if not isinstance(spec, str) or not spec or _SYM_CLAIMED is None \
+            or _SYM_TABLE_HI is None:
+        # r305-scopeclaim's claim-blind pass reads the statement as main does
+        return None
+    if ast.while_cond is not None or ast.additive or ast.nooptimize \
+            or ast.scope_word is not None or ast.in_before_for \
+            or ast.in_before_all or ast.for_before_all \
+            or getattr(ast, "for_bracket", False):
+        return None
+    a = _table_new_index(syms, spec)
+    if ast.for_cond is not None:
+        lo = ast.fields_lo
+    elif a is not None and a == _SYM_STMT_LO:
+        # no FOR: the statement's other new operands are the pairs' names
+        lo = _SYM_STMT_HI if _SYM_STMT_HI > a else None
+    else:
+        lo = _SYM_STMT_LO       # a pair's name numbered below the alias
+    if a is not None and lo is not None and a > lo:
+        return None
+    # An alias the statement spells again (a field's qualifier, a FOR name)
+    # is numbered where that spelling stands, whichever side IN is on: only
+    # a missing IN can tell then (census: `REPLACE t.f WITH v IN t` behind an
+    # earlier IN numbers one table both ways).
+    below = a is not None and lo is not None and a < lo and seen.count(a) == 1
+    if below:
+        if _table_new_index(syms, "IN") is not None:
+            return None
+    elif "IN" in syms or "IN" not in _scope_words(ast):
+        return None
+    order = "lead"
+    if ast.all_scope and below:
+        al = _unclaimed_new_index(syms, "ALL")
+        if al is not None and al < lo:
+            ast.all_first = True
+            if al > a:
+                order = "before_all"
+    if ast.for_cond is None:
+        return order
+    f = _unclaimed_new_index(syms, "FOR")
+    if ast.for_ahead:
+        if order != "lead":
+            return None
+        return "lead" if below and f is not None and a < f else "for"
+    if below and f is not None and a < f < lo:
+        if order != "lead":
+            return None
+        ast.for_ahead = True
+    return order
+
+
+def _replace_for_ahead(syms, ast) -> bool:
+    """r305-forahead: did the source write FOR ahead of the fields of a REPLACE ... IN?
+
+    Oracle round 303 `b03` and round 305 `c09`/`c10`/`c11`: `REPLACE FOR c f
+    WITH v IN t` stores the frame `f WITH v FOR c IN t` stores, and interns
+    FOR and then IN (FOR ahead, IN the first word after the fields), where
+    the trailing spelling interns FOR alone and IN-first IN alone. So a new
+    FOR in this statement's slot with a new IN in the next one says FOR stood
+    ahead. Only the measured shape: a statement that introduces no name, a
+    plain IN alias already in the table, and no ALL, scope word, WHILE,
+    NOOPTIMIZE or ADDITIVE. A statement that introduces names is read by
+    r308-forahead (`_replace_for_ahead_new`).
+    """
+    if ast.for_cond is None:
+        return False
+    if (ast.all_scope or ast.scope_word is not None or ast.while_cond is not None
+            or ast.nooptimize or ast.additive or ast.all_first
+            or ast.for_before_all or ast.in_before_for):
+        return False
+    if _SYM_TABLE_HI is None:
+        return False
+    if _SYM_STMT_LO is not None or _SYM_STMT_HI > _SYM_TABLE_HI:
+        return _replace_for_ahead_new(syms, ast)
+    if not isinstance(ast.in_spec, str) or not ast.in_spec:
+        return False
+    f = _table_new_index(syms, "FOR")
+    n = _table_new_index(syms, "IN")
+    if f is None or n is None:
+        return False
+    slot = _scope_slot()
+    if f != slot:
+        return False
+    nxt = f + 1
+    while _claimed_earlier(nxt):
+        nxt += 1
+    return n == nxt
+
+
+# r312-forscope: the orders of the words behind a FOR-ahead field list the
+# oracle measured, by the word written first (round 312 ra01-ra09, rn05,
+# rn06, rn11, rn13): the others follow it in this order.
+_FOR_AHEAD_BEHIND = {"ALL": {(), ("NOOPTIMIZE",), ("IN",)},
+                     "IN": {(), ("ALL",)},
+                     "NOOPTIMIZE": {()},
+                     "REST": {()}}
+
+
+def _replace_for_ahead_scope(syms, ast):
+    """r312-forscope: the word the table numbers first behind the fields of
+    `REPLACE [ALL] FOR c f WITH v <words>`, or None.
+
+    Oracle round 312 ra01-ra09, rn05, rn06, rn11, rn13 (round 308 c33, n08):
+    FOR written ahead of the fields is numbered, and so is the first word
+    written behind them, ALL, REST, NOOPTIMIZE or IN; written behind the
+    fields, FOR is that one word itself and nothing after it is numbered
+    (round 282). So a FOR this statement numbered in the first free slot, or
+    right above an ALL written ahead of it, below every name the statement
+    introduces, with exactly one of its words behind the fields numbered
+    above it within the statement's span, says FOR stood ahead. The shape
+    with no scope word but IN is r305-forahead's; WHILE, ADDITIVE, NEXT, REST
+    ahead, a parenthesised IN and the unmeasured orders keep main's text."""
+    if ast.for_cond is None or ast.while_cond is not None or ast.additive:
+        return None
+    if ast.scope_word not in (None, "REST") or (ast.all_first and not ast.all_scope):
+        return None
+    if not (ast.all_scope or ast.scope_word or ast.nooptimize):
+        return None
+    if ast.in_spec is not None and not (isinstance(ast.in_spec, str) and ast.in_spec):
+        return None
+    if _SYM_CLAIMED is None or _SYM_TABLE_HI is None:
+        # r305-scopeclaim's claim-blind pass reads the statement as main does
+        return None
+    behind = [w for w, on in (("ALL", ast.all_scope and not ast.all_first),
+                              ("REST", ast.scope_word == "REST"),
+                              ("NOOPTIMIZE", ast.nooptimize),
+                              ("IN", ast.in_spec is not None)) if on]
+    new = [w for w in behind if _unclaimed_new_index(syms, w) is not None]
+    if len(new) != 1:
+        return None
+    first = new[0]
+    if tuple(w for w in behind if w != first) not in _FOR_AHEAD_BEHIND[first]:
+        return None
+    f = _unclaimed_new_index(syms, "FOR")
+    if f is None:
+        return None
+
+    def free(i):
+        while _spelled_earlier(syms, i) or _claimed_earlier(i):
+            i += 1
+        return i
+
+    slot = free(_SYM_TABLE_HI + 1)
+    if ast.all_first:
+        if _unclaimed_new_index(syms, "ALL") != slot:
+            return None
+        slot = free(slot + 1)
+    if f != slot or (_SYM_STMT_LO is not None and f > _SYM_STMT_LO):
+        return None
+    w = _unclaimed_new_index(syms, first)
+    return first if f < w <= max(_SYM_STMT_HI, f) + 1 else None
+
+
+def _replace_for_ahead_new(syms, ast) -> bool:
+    """r308-forahead: `REPLACE FOR c f WITH v [IN t]` in a statement that
+    introduces names.
+
+    Oracle round 308 c12, c20, c24-c29, c32: FOR written ahead of the fields
+    is the statement's first entry, ahead of every name it introduces, and IN,
+    when written, is then the first word after the fields (FOR QA QC IN QB for
+    c12). Written behind the fields, FOR follows their new names and IN is not
+    interned (c21, c22). So a FOR in the first slot no earlier statement
+    numbered, below every name this statement introduces, with a new field
+    name above it or a new IN above it within the statement's span, says FOR
+    stood ahead. With the fields' names all old and no IN entry both spellings
+    give one table (c30, c31) and the stored order stands.
+    """
+    if ast.in_spec is not None and not (isinstance(ast.in_spec, str) and ast.in_spec):
+        return False
+    if _SYM_CLAIMED is None:
+        # r305-scopeclaim's claim-blind pass reads the statement as main does
+        return False
+    f = _unclaimed_new_index(syms, "FOR")
+    if f is None:
+        return False
+    slot = _SYM_TABLE_HI + 1
+    while _spelled_earlier(syms, slot) or _claimed_earlier(slot):
+        slot += 1
+    if f != slot or _SYM_STMT_LO is None or f >= _SYM_STMT_LO:
+        return False
+    if ast.fields_lo is not None and ast.fields_lo > f:
+        return True
+    if ast.in_spec is None:
+        return False
+    n = _unclaimed_new_index(syms, "IN")
+    return n is not None and f < n <= max(_SYM_STMT_HI, f) + 1
+
+
+def _replace_all_first_in(syms, ast) -> bool:
+    """r298-replaceallin: did the source write ALL ahead of the fields of a REPLACE ... IN?
+
+    Oracle round298_sqltrail.json cell a04 and round298_cells.json w1-w9:
+    `REPLACE ALL fa WITH 1 IN tbx` interns ALL, FA, IN, TBX, while `REPLACE fa
+    WITH 1 ALL IN tbx` interns FA, ALL, TBX; all three spellings store the same
+    frame. A new ALL and a new IN, ALL first, say ALL stood ahead of the fields.
+    The IN must be this statement's: right below an alias name it introduces,
+    or, with an alias already in the table (w4: USE spelled it), right above
+    the last name it introduces, with ALL below every one of them (wztable's
+    row: no new name, ALL and IN in the two slots above the high-water). An IN
+    an earlier statement interned leaves ALL below the first new field. FOR,
+    WHILE, NOOPTIMIZE, ADDITIVE, REST/NEXT and a parenthesised or string IN
+    keep the default order.
+    """
+    if not ast.all_scope or ast.all_first or ast.for_cond is not None:
+        return False
+    spec = ast.in_spec
+    if not isinstance(spec, str) or not spec:
+        return False
+    if ast.nooptimize or ast.additive or ast.scope_word is not None \
+            or ast.while_cond is not None:
+        return False
+    # r305-scopeclaim: an ALL an earlier statement interned is not this one's
+    a = _unclaimed_new_index(syms, "ALL")
+    if a is None:
+        return False
+    t = _table_new_index(syms, spec)
+    if "IN" in syms and syms.index("IN") < a:
+        # An earlier statement interned IN (`REPLACE f WITH v IN t` does,
+        # round 300 ci_in_only), so this one adds none: ALL first stands
+        # below the first field it introduces (cells w10, w12; w11, w13 put
+        # it above). With no new field the alias is the lowest new name and
+        # both orders intern the same table (w14): the default stands.
+        return (_SYM_STMT_LO is not None and a < _SYM_STMT_LO
+                and t != _SYM_STMT_LO)
+    b = _table_new_index(syms, "IN")
+    if b is None or a > b:
+        return False
+    if t is not None and t > a:
+        return b == t - 1
+    # The alias was in the table before the ALL: IN follows the last name the
+    # statement introduces, and no name it introduces stands below the ALL.
+    if b != max(a, _SYM_TABLE_HI, _SYM_STMT_HI) + 1:
+        return False
+    return all(_spelled_earlier(syms, i) for i in range(_SYM_TABLE_HI + 1, a))
 
 
 def _table_new_index(syms, name):
@@ -2929,6 +3673,10 @@ _GROUP_EOW_CLOSE = False
 # LENGTH ends the body, so its last clause group closes on its own fd — the
 # opposite of a statement, where the closer is stripped at the end.
 _SQL_SUBQUERY_BODY = False
+_SQL_SPLICED_BODY = False
+"""r298-sqltrail: a statement spliced inside another (INSERT INTO … SELECT).
+Oracle round298_sqltrail.json cells i1/i2: there DISTINCT and TOP intern
+nothing in either position, so the spelling is a tie and keeps main's text."""
 _ARENA = []                  # live operand stacks, innermost last
 _GROUP_DEPTH = 0              # live 43-group frames (the packet-nesting test
                               # of the W15-close residual gates on this)
@@ -3091,16 +3839,24 @@ def _elem_e0_receiver(stack):
     return elem
 
 
-def _dec_inlist_items(raw):
+def _dec_inlist_items(raw, syms=None):
     """The payload of an `ff 00 <u16 N> <N bytes>` SQL IN-list: 07-joined
     stock literals, `f8 <width> <value>` ints, `f9 <width> <i16>` ints and
     `fb <u16> <bytes>` strings (round-104 r104-binlit matrix; the f9 item is
     round 278's q_f9_val window). Each item is built with the stock literal
     arm's own constructor call, so emission is the stock spelling and
-    recompiles byte-equal. Any other item lead, a missing joiner, or an empty
-    payload stays a named refusal — measured but unadopted shapes are findings,
-    never guesses. INT32 (`e9`) and float (`fa`) items were measured in the
-    same matrix and stay refused."""
+    recompiles byte-equal. INT32 (`e9`) and float (`fa`) items were measured in
+    the same matrix and stay refused.
+
+    r302-inmember: a reference item is one of three measured shapes — a bare
+    field `f7 <sym>`, a member path `f4 <sym> (f4 <sym>)* f7 <sym>`, or a memvar
+    `f5 0d f7 <sym>` — built with the same Sym / MemberPath / MemvarRef nodes the
+    ordinary expression decoder uses, so each emits its source spelling and the
+    list recompiles byte-equal (oracle round302_cells.json in_field / in_this /
+    in_dotmv / in_memvar; the corpus carriers are frxbuilder2.vcx rec 110
+    `OBJTYPE IN (THIS.Event.OBJTYPE, -1, 55)` and liquidaciones `OT IN (COT)`).
+    Any other item lead, a missing joiner, or an empty payload stays a named
+    refusal — measured but unadopted shapes are findings, never guesses."""
     if not raw:
         raise Unsupported("binary literal 0x00 empty list unmeasured")
     items = []
@@ -3126,6 +3882,29 @@ def _dec_inlist_items(raw):
                 raise Unsupported("binary literal 0x00 item truncated")
             items.append(Str(_payload_text(raw[k + 3:k + 3 + m])))
             k += 3 + m
+        elif b == S.SYM:
+            # r302-inmember: a bare field item, `f7 <sym>`.
+            if k + 3 > n:
+                raise Unsupported("binary literal 0x00 item truncated")
+            items.append(Sym(_sym(syms, S.u16(raw, k + 1))))
+            k += 3
+        elif b == S.MEMBER:
+            # r302-inmember: a member path, `f4 <sym> (f4 <sym>)* f7 <sym>`.
+            names = []
+            while k + 3 <= n and raw[k] == S.MEMBER:
+                names.append(_sym(syms, S.u16(raw, k + 1)))
+                k += 3
+            if k + 3 > n or raw[k] != S.SYM:
+                raise Unsupported("binary literal 0x00 member item unterminated")
+            names.append(_sym(syms, S.u16(raw, k + 1)))
+            k += 3
+            items.append(MemberPath(names))
+        elif b == S.WORKAREA_REF:
+            # r302-inmember: a memvar item, `f5 0d f7 <sym>`.
+            if k + 5 > n or raw[k + 1] != 0x0D or raw[k + 2] != S.SYM:
+                raise Unsupported("binary literal 0x00 memvar item shape")
+            items.append(MemvarRef(_sym(syms, S.u16(raw, k + 3))))
+            k += 5
         else:
             raise Unsupported(
                 f"binary literal 0x00 item opcode 0x{b:02x} unmeasured")
@@ -3207,10 +3986,14 @@ def _dec_expr_run(buf, i, end, syms, stack, stop_at_one=False,
             stack.append(Flt(_fmt_float(v), buf[i + 1], buf[i + 2],
                              marked=marked)); i += 11
         elif op == S.STR:
+            if _EXPR_STR_AT is not None:
+                _EXPR_STR_AT.add((id(buf), i))
             n = S.u16(buf, i + 1)
             stack.append(Str(_payload_text(buf[i + 3:i + 3 + n]))); i += 3 + n
         elif op == S.STR2:
             # double-quoted literal (FINDINGS: quote style is canonical, 12/12 aligned)
+            if _EXPR_STR_AT is not None:
+                _EXPR_STR_AT.add((id(buf), i))
             n = S.u16(buf, i + 1)
             stack.append(Str(_payload_text(buf[i + 3:i + 3 + n]), dq=True)); i += 3 + n
         elif op == S.TRUE:
@@ -3261,7 +4044,7 @@ def _dec_expr_run(buf, i, end, syms, stack, stop_at_one=False,
                 if i + 4 + n > end:
                     raise Unsupported(
                         f"binary literal payload truncated ({n} declared)")
-                stack.append(_dec_inlist_items(bytes(buf[i + 4:i + 4 + n])))
+                stack.append(_dec_inlist_items(bytes(buf[i + 4:i + 4 + n]), syms))
                 i += 4 + n
                 continue
             if buf[i + 1] != 0x01:
@@ -3395,6 +4178,19 @@ def _dec_expr_run(buf, i, end, syms, stack, stop_at_one=False,
                     while kt < jk:
                         recv.append(_sym(syms, S.u16(buf, kt + 1)))
                         kt += 3
+                    if isinstance(stack[-1], MidCall) \
+                            and stack[-1].prop is None:
+                        # r309-withchain: a link closed by `e5` is the
+                        # receiver of what follows it, never an argument (an
+                        # argument-position call closes with `f6`, r48-
+                        # callchain). `.qa(qi).qb.qa(0).qc` inside WITH
+                        # wires `43 <0> 43 00 <qi> e2 e5 <qa> f4 <qb> e5
+                        # <qa> f7 <qc>`, the finished-argument twin
+                        # `qb.qa(0, .qa(qi)).qc` `… e2 f6 <qa> …` (oracle
+                        # round309_cells w01 against w32). The hop run is
+                        # therefore read on the link's value, and only the
+                        # operands below it are the next link's arguments.
+                        recv = [stack.pop()] + recv
                     _dec_args_first_call(buf, jk, end, syms, stack, recv)
             try:
                 node, i = _dec_path(buf, i, end, syms,
@@ -4144,16 +4940,16 @@ def _dec_expr_run(buf, i, end, syms, stack, stop_at_one=False,
             # ByrefMemvarRef), and '18 f6 <u16>' closing the nested
             # array-element group '@arr(subscript)' (a0004 — flag precedes the
             # NAME ref, not the subscript). Anything else keeps the historical
-            # node-less consumption. Two further shapes ARE on the grammar but
-            # occur nowhere in the corpus, so nothing decodes them yet: the
-            # two-hop path '@This.Width' / '@alias.field' = 18 f4 <u16>
+            # node-less consumption. Two further shapes ARE on the grammar:
+            # the two-hop path '@This.Width' / '@alias.field' = 18 f4 <u16>
             # f7 <u16> (r41 e02/f02 — they compile, contrary to the r38
-            # prediction that no wire could demand more), and the m.-qualified
-            # array element '@m.arr(sub)' = 43 <sub> f5 0d 18 f6 <u16>
-            # (r41 d01/d02), whose flag rides BETWEEN the bank prefix and the
-            # name ref. Whole-corpus raw scan: 18 f5 0d f4, 18 f5 0d f6 and
-            # f5 0d 18 all have zero occurrences, and every raw '18 f4'/'18 f6'
-            # hit is the INT8 literal 'f8 02 18' (value 24). The paren form and
+            # prediction that no wire could demand more), decoded since
+            # r304-byrefpath below (corpus 2 carries three statements), and
+            # the m.-qualified array element '@m.arr(sub)' = 43 <sub> f5 0d
+            # 18 f6 <u16> (r41 d01/d02), whose flag rides BETWEEN the bank
+            # prefix and the name ref, which nothing decodes. r41's
+            # whole-corpus raw scan: 18 f5 0d f4, 18 f5 0d f6 and f5 0d 18 all
+            # have zero occurrences. The paren form and
             # bare '@' stay compiler-rejected (a0005/a0006, retwinned
             # m.-qualified as e04/e05), as does '@' on an expression (e03), on
             # a three-hop path (e01) and WITH-scoped (e06).
@@ -4165,6 +4961,20 @@ def _dec_expr_run(buf, i, end, syms, stack, stop_at_one=False,
                     and buf[i + 2] == 0x0D and buf[i + 3] == S.SYM:
                 stack.append(ByrefMemvarRef(_sym(syms, S.u16(buf, i + 4))))
                 i += 6
+                continue
+            if i + 7 <= end and buf[i + 1] == S.MEMBER \
+                    and buf[i + 4] == S.SYM:
+                # r304-byrefpath: the two-hop path '@o.p' / '@THIS.p' wires
+                # '18 f4 <o> f7 <p>' (oracle round304_cells c01/c02/c04/c08/
+                # c09/c12-c15); the by-value path carries no flag byte (c18).
+                # The three-hop '@o.p.q', '@m.o.p' and '@_SCREEN.p' are
+                # compile errors (c03/c05/c10, r41 e01), so only the two-hop
+                # run is read; a longer run keeps the node-less consumption
+                # below.
+                stack.append(ByrefMemberPath(
+                    [_sym(syms, S.u16(buf, i + 2)),
+                     _sym(syms, S.u16(buf, i + 5))]))
+                i += 7
                 continue
             if i + 2 <= end and buf[i + 1] == S.NAME:
                 global _ARG_BYREF_CLOSE
@@ -5072,6 +5882,24 @@ def _dec_do_with_list(buf, t, end, syms):
             except Unsupported:
                 raise Unsupported("DO WITH argument unwrapped")
             args.append(node)
+        elif buf[t] == 0xE1 and t + 2 <= end \
+                and buf[t + 1] in S.SYSTEM_OBJECT_REFS:
+            # r304-dowithsys: a _SCREEN / _VFP property path rides the list
+            # unwrapped, `e1 <id> [f4 <hop>]* f7 <prop>` (oracle
+            # round304_cells b01/b02/b09/b14/b17, DO FORM b21/b23-b30, DO IN
+            # b08/b18); a call, an element, an expression or a paren on the
+            # same root is fc-wrapped (b10/b15/b16/b19) and reads below.
+            # Anything else behind the opener keeps the unwrapped refusal.
+            names = [S.SYSTEM_OBJECT_REFS[buf[t + 1]]]
+            j = t + 2
+            while j + 3 <= end and buf[j] == S.MEMBER:
+                names.append(_sym(syms, S.u16(buf, j + 1)))
+                j += 3
+            if j + 3 > end or buf[j] != S.SYM:
+                raise Unsupported("DO WITH argument unwrapped")
+            names.append(_sym(syms, S.u16(buf, j + 1)))
+            args.append(MemberPath(names))
+            t = j + 3
         elif buf[t] == S.WORKAREA_REF:
             # r89-dowith: `DO p WITH m.x` wires `d1 f5 0d f7<x>`. Only the
             # plain symbol spelling is measured; anything else behind f5 0d
@@ -5104,6 +5932,9 @@ def _dec_do_with_list(buf, t, end, syms):
     return args, t
 
 
+_SYSTEM_OBJECT_ROOTS = frozenset(S.SYSTEM_OBJECT_REFS.values())
+
+
 def _do_collect_symbols(node, out):
     """Append the interned symbol names under a DO FORM clause operand.
 
@@ -5134,7 +5965,13 @@ def _do_collect_symbols(node, out):
         out.append(node.name)
         return True
     if isinstance(node, MemberPath):
-        out.extend(node.names)
+        names = node.names
+        if names and names[0] in _SYSTEM_OBJECT_ROOTS:
+            # r304-dowithsys: a _SCREEN / _VFP root is the e1 opener and
+            # interns nothing; its hops and property do (oracle
+            # round304_cells b09: CAPTION only; b24/b29/b30 WITH-first).
+            names = names[1:]
+        out.extend(names)
         return True
     if isinstance(node, WithRef):
         # r205-dowithref: a single-.dotted WITH arg (.CAPTION) interns its
@@ -5293,6 +6130,46 @@ def _copy_cond_before_fields(fields, cond, while_cond, syms, busy):
     return max(tab[s] for s in cond_syms) < min(tab[s] for s in field_only)
 
 
+def _copy_cond_before_skeleton(c, syms):
+    """r303-copyskel: FOR/WHILE before a FIELDS LIKE/EXCEPT skeleton.
+
+    Oracle round 303 y01-y03: `COPY TO p FIELDS EXCEPT x TYPE XL5 FOR a != b`,
+    `COPY TO p FOR a != b FIELDS EXCEPT x TYPE XL5` and `COPY TO p TYPE XL5 FOR
+    a != b FIELDS EXCEPT x` compile to one frame; the skeleton is interned
+    where it is written, so a skeleton above every condition name was written
+    after the condition. Only a plain one-name skeleton with at most a TYPE
+    word was measured; anything else keeps FIELDS first.
+    """
+    skel = c["fields_except"] if c["fields_like"] is None else c["fields_like"]
+    if c["fields_like"] is not None and c["fields_except"] is not None:
+        return False
+    if not isinstance(skel, str) or not skel.replace("_", "").isalnum() \
+            or skel[0].isdigit():
+        return False
+    if c["fields"] or c["fields_group"] is not None or c["cdx"] or c["scope"] \
+            or c["database"] or c["codepage"] or c["nooptimize"] \
+            or c["additive"] or c["extended"] or c["delimited"] is not None:
+        return False
+    if c["cond"] is None and c["while_cond"] is None:
+        return False
+    cond_syms = []
+    for node in (c["cond"], c["while_cond"]):
+        if node is None:
+            continue
+        got = _do_clause_symbols(node)
+        if not got:
+            return False
+        cond_syms.extend(x.upper() for x in got)
+    hits = [i for i, x in enumerate(syms)
+            if isinstance(x, str) and x.upper() == skel.upper()]
+    if len(hits) != 1 or skel.upper() in cond_syms:
+        return False
+    tab = {x.upper(): i for i, x in enumerate(syms) if isinstance(x, str)}
+    if not cond_syms or any(x not in tab for x in cond_syms):
+        return False
+    return max(tab[x] for x in cond_syms) < hits[0]
+
+
 def _delete_keyword_at(syms, name):
     hits = [i for i, s in enumerate(syms)
             if isinstance(s, str) and s.upper() == name]
@@ -5440,31 +6317,42 @@ def _dec_quoted_target(buf, t, end):
 
 
 def _dec_do_form_clauses(buf, t, end, syms):
-    """Interned DO FORM bank: NAME, TO, WITH, then NOREAD LINKED NOSHOW."""
+    """Interned DO FORM bank: NAME, TO, WITH, then NOREAD LINKED NOSHOW.
+
+    r310-nameorder: also returns the symbol indexes each of NAME, TO and WITH
+    resolved, for `_do_form_name_slot`."""
     name_target = None
     to_target = None
     args = []
     flags = []
     seen = set()
+    taps = {}
     while t < end:
         b = buf[t]
         if b == 0x4A:
             if "NAME" in seen:
                 raise Unsupported("DO FORM duplicate NAME")
             seen.add("NAME")
-            name_target, t = _dec_do_form_name(buf, t + 1, end, syms)
+            with _sym_tap() as tap:
+                name_target, t = _dec_do_form_name(buf, t + 1, end, syms)
+            taps["NAME"] = tap.idx
         elif b == S.TO_MARK:
             if "TO" in seen:
                 raise Unsupported("DO FORM duplicate TO")
             seen.add("TO")
-            to_target, t = _dec_quoted_target(buf, t + 1, end)
-            if to_target is None:
-                to_target, t = _dec_lvalue(buf, t, end, syms)
+            with _sym_tap() as tap:
+                to_target, t = _dec_quoted_target(buf, t + 1, end)
+                if to_target is None:
+                    to_target, t = _dec_lvalue(buf, t, end, syms)
+            taps["TO"] = tap.idx
         elif b == S.REPLACE_WITH:
             if "WITH" in seen:
                 raise Unsupported("DO FORM duplicate WITH")
             seen.add("WITH")
-            args, t = _dec_do_with_list(buf, t + 1, end, syms)
+            with _sym_tap() as tap:
+                args, t = _dec_do_with_list(buf, t + 1, end, syms)
+            if args:
+                taps["WITH"] = tap.idx
         elif b in _DO_FORM_FLAGS:
             word = _DO_FORM_FLAGS[b]
             if word in seen:
@@ -5474,7 +6362,81 @@ def _dec_do_form_clauses(buf, t, end, syms):
             t += 1
         else:
             break
-    return args, to_target, name_target, flags, t
+    return args, to_target, name_target, flags, taps, t
+
+
+def _do_form_entries(form, syms):
+    """Table entries a DO FORM's form name may have numbered (r310-nameorder).
+
+    ``form`` is the indexes a `(expr)` form resolved, or the literal name.
+
+    The form is spelled ahead of every clause and interns entries with no
+    operand: oracle round 310 n01 `qr.scx` numbers QR and SCX, n03 `qd\\qr`
+    numbers QD, a quoted name numbers nothing (n05). Every table entry that
+    spells a word of the name is returned; one a later statement numbered only
+    raises the bound `_do_form_name_slot` reads, which turns a placement into a
+    tie, never into a move."""
+    if not isinstance(form, str):
+        return list(form)
+    words = {w.upper() for w in _re.split(r"\W+", form) if w}
+    return [i for i, s in enumerate(syms) if isinstance(s, str) and s.upper() in words]
+
+
+def _do_form_name_slot(form, taps, with_first, syms):
+    """How many of the TO / WITH clauses the author wrote ahead of NAME (r310-nameorder).
+
+    VFP9 stores a DO FORM's clauses in one order (NAME `4a`, TO, WITH, then
+    NOREAD LINKED NOSHOW) whatever order the source wrote them in, and numbers
+    each name of the symbol table where the source first wrote it (oracle round
+    310 o01-o12, l01-l12: the twelve orders of NAME, TO and WITH store one frame
+    and the six orders of the names; f01-f12: a flag anywhere stores the same
+    frame and interns nothing). So of NAME and another clause that both
+    introduce a name in this statement, the one whose lowest new index is lower
+    was written first.
+
+    A name is new here when its index stands above the section high-water and
+    above every entry the form name numbered (the form is spelled first), and
+    it is no word of a string an earlier statement spelled as a name and no
+    scope word an earlier statement claimed: those entries have no operand, so
+    the high-water never sees them (round 281's trap; round 310 e01-e04, n09,
+    n10, p01-p10, q01-q06, and r01-r10: an earlier form `qs.scx` numbers QS and
+    SCX, `qd\\qs` numbers QD, while the spelled set keeps the whole string). A
+    word the compiler did not number reads as old and only makes a tie (r11).
+    A clause that introduces no name (an old name, a literal, a quoted NAME or
+    TO: d01-d04, kw07-kw10, kn09, kt05) ties with NAME, and so does a name the
+    two clauses share as their lowest; a tie keeps main's NAME-first text. TO against WITH keeps
+    r89-dowith's reading, and NAME takes the slot behind the last clause the
+    table puts ahead of it. Outside a section walk nothing is known about first
+    use and NAME stays first."""
+    if _SYM_TABLE_HI is None or "NAME" not in taps:
+        return 0
+    lo = max([_SYM_TABLE_HI] + _do_form_entries(form, syms))
+    spelled = set()
+    for text in _SYM_SPELLED or ():
+        if isinstance(text, tuple):
+            continue    # r305b-literalname: a literal numbers nothing
+        spelled.update(w for w in _re.split(r"\W+", text) if w)
+
+    def new(idxs):
+        return [i for i in idxs if i > lo and not _claimed_earlier(i)
+                and not (isinstance(syms[i], str) and syms[i].casefold() in spelled)]
+
+    name_new = new(taps["NAME"])
+    if not name_new:
+        return 0
+    order = [w for w in ("TO", "WITH") if w in taps]
+    if with_first and len(order) == 2:
+        order.reverse()
+    slot, limit = 0, len(order)
+    for pos, word in enumerate(order):
+        other = new(taps[word])
+        if not other or min(other) == min(name_new):
+            continue
+        if min(other) < min(name_new):
+            slot = max(slot, pos + 1)
+        else:
+            limit = min(limit, pos)
+    return slot if slot <= limit else 0
 
 
 def _dec_with_index_prop(buf, j, end, syms):
@@ -6302,6 +7264,218 @@ def _dec_chain_group(buf, i, end, syms):
     return node, j                     # j == end (strict statement-final form)
 
 
+class _LinkObject:
+    """r312-linkpacket: an object value a link packet reader holds open."""
+
+    def __init__(self, root):
+        self.recv = [root]
+        self.calls = []
+        self.link_hops = []
+
+    def hop(self, name):
+        (self.link_hops[-1] if self.calls else self.recv).append(name)
+
+    def chain(self, tail):
+        return ObjectChain(self.recv, self.calls, tail, [], self.link_hops)
+
+
+_LINK_MARK = object()
+
+
+def _link_packet_expr(buf, i, end, syms):
+    """r312-linkpacket: read `fc <expr>` to the statement end as link packets.
+
+    Oracle round312_cells wp01-wp18, wo01-wo15 (round 309 w13, w14, w20, w28,
+    w31): every `e5`-closed link of a call chain owns one `43` packet, the last
+    link's outermost, so `ALLTRIM(qo.qa(qi).qb.qd(0).qc)` wires `43 43 <0> 43
+    00 <qi> f4 qo e5 qa f4 qb e5 qd f7 qc 9b` and `.qa().qb.qd(qi)` wires `43
+    <qi> 43 e2 e5 qa ...`. A link closes the innermost packet: its top is the
+    receiver, the values below it the link's arguments. `f6` closes a packet as
+    the chain's last call when an object stands on top and as a user call
+    otherwise; a bare builtin id closes its own packet. Only these tokens are
+    read: `43`, a `00` ByVal prefix, f7, `f5 0d` f7 or f4, f8, f9, fb, d9, e2,
+    f4, e5, f6 and a bare closer the group reader admits. Anything else
+    raises."""
+    stack = []
+
+    def take():
+        args = []
+        while stack and stack[-1] is not _LINK_MARK:
+            v = stack.pop()
+            if isinstance(v, _LinkObject):
+                raise Unsupported("link packet holds an open object")
+            args.append(v)
+        if not stack:
+            raise Unsupported("link packet without opener")
+        stack.pop()
+        return args[::-1]
+
+    while i < end:
+        op = buf[i]
+        if op == S.CALL_OPEN:
+            stack.append(_LINK_MARK)
+            i += 1
+        elif op == 0x00 and i + 1 < end and buf[i + 1] in (S.SYM, S.WORKAREA_REF):
+            i += 1                 # ByVal prefix of a name argument
+        elif op == S.WORKAREA_REF and i + 5 <= end and buf[i + 1] == 0x0D \
+                and buf[i + 2] in (S.SYM, S.MEMBER):
+            name = _sym(syms, S.u16(buf, i + 3))
+            stack.append(MemvarRef(name) if buf[i + 2] == S.SYM
+                         else _LinkObject("m." + name))
+            i += 5
+        elif op == S.SYM and i + 3 <= end:
+            name = _sym(syms, S.u16(buf, i + 1))
+            if stack and isinstance(stack[-1], _LinkObject):
+                stack.append(stack.pop().chain([name]))
+            else:
+                stack.append(Sym(name))
+            i += 3
+        elif op == S.INT8 and i + 3 <= end:
+            stack.append(Num(str(buf[i + 2]), op=op, width=buf[i + 1]))
+            i += 3
+        elif op == S.INT16 and i + 4 <= end:
+            stack.append(Num(str(_struct.unpack_from("<h", buf, i + 2)[0]),
+                             op=op, width=buf[i + 1]))
+            i += 4
+        elif op in (S.STR, S.STR2) and i + 3 <= end:
+            n = S.u16(buf, i + 1)
+            if i + 3 + n > end:
+                raise Unsupported("link packet string truncated")
+            if _EXPR_STR_AT is not None:
+                _EXPR_STR_AT.add((id(buf), i))
+            stack.append(Str(_payload_text(buf[i + 3:i + 3 + n]),
+                             dq=(op == S.STR2)))
+            i += 3 + n
+        elif op == S.WITHREF:
+            stack.append(_LinkObject(""))
+            i += 1
+        elif op == S.MEMBER and i + 3 <= end:
+            name = _sym(syms, S.u16(buf, i + 1))
+            if stack and isinstance(stack[-1], _LinkObject):
+                stack[-1].hop(name)
+            else:
+                stack.append(_LinkObject(name))
+            i += 3
+        elif op in (S.ARRAY_ELEM_CALL, S.NAME) and i + 3 <= end:
+            name = _sym(syms, S.u16(buf, i + 1))
+            obj = stack.pop() if stack and isinstance(stack[-1], _LinkObject) \
+                else None
+            if obj is None and op == S.ARRAY_ELEM_CALL:
+                raise Unsupported("link without receiver")
+            args = take()
+            if obj is None:
+                stack.append(Call(("user", name), args))
+            else:
+                obj.calls.append((name, args))
+                obj.link_hops.append([])
+                stack.append(obj if op == S.ARRAY_ELEM_CALL else obj.chain([]))
+            i += 3
+        elif op in S.MEASURED_LOCAL_GROUP_CLOSERS \
+                or op in S.CORPUS_ALIGNED_BARE_CLOSERS or op in _ENABLE_EXTRA_BARE:
+            args = take()
+            if op in S.MEASURED_LOCAL_GROUP_CLOSERS:
+                lo, hi = S.MEASURED_LOCAL_GROUP_CLOSERS[op]
+                if not lo <= len(args) <= hi:
+                    raise Unsupported("link packet closer arity")
+            elif op in _ENABLE_EXTRA_BARE and not _bare_arity_admits(op, args):
+                raise Unsupported("link packet closer arity")
+            stack.append(Call(("bare_builtin", op), args))
+            i += 1
+        else:
+            raise Unsupported("link packet token 0x%02x" % op)
+    if len(stack) != 1 or stack[0] is _LINK_MARK \
+            or isinstance(stack[0], _LinkObject):
+        raise Unsupported("link packets unbalanced")
+    return stack[0]
+
+
+def _dec_link_packets(buf, syms):
+    """r312-linkpacket: `v = <chain expression>` read by its link packets.
+
+    Returns the assignment, or None to keep what the decode passes made of it."""
+    end = len(buf)
+    if end < 7 or buf[0] != S.ASSIGN or buf[1] != S.SYM or buf[4] != S.EQ \
+            or buf[5] != S.FC or S.ARRAY_ELEM_CALL not in buf:
+        return None
+    _SYM_SEEN.clear()
+    if _EXPR_STR_AT is not None:
+        _EXPR_STR_AT.clear()
+    try:
+        lv = Sym(_sym(syms, S.u16(buf, 2)))
+        return Assign(lv, _link_packet_expr(buf, 6, end, syms))
+    except Unsupported:
+        return None
+
+
+def _link_packets_or(buf, syms, ast):
+    """r312-linkpacket: an assignment the link packets read whole is read by them.
+
+    The decode passes may leave a link unfinished (an element still waiting for
+    its method, which the emitter refuses: w14, w20, w28, w31) or bind a link's
+    packet to the wrong call (wp14 `QD(.QA(QI)).QF(1)`, wo10's arguments lifted
+    into ALLTRIM). Over both corpora's scored splits the packets read 2,195
+    such assignments and every one emits main's text. Where the decode's own
+    reading emits the packets' text it stands, with the names and literals it
+    resolved, so the nodes later passes see are main's."""
+    if not isinstance(ast, Assign):
+        return ast
+    seen = list(_SYM_SEEN)
+    strs = None if _EXPR_STR_AT is None else set(_EXPR_STR_AT)
+    packets = _dec_link_packets(buf, syms)
+    if packets is not None:
+        try:
+            if _emit_line(ast) != _emit_line(packets):
+                return packets
+        except Unsupported:
+            return packets
+    _SYM_SEEN[:] = seen
+    if strs is not None:
+        _EXPR_STR_AT.clear()
+        _EXPR_STR_AT.update(strs)
+    return ast
+
+
+def _dec_with_chain_put(buf, syms):
+    """r312-withput: a WITH-scoped put target of two or more links, read as
+    its object-rooted twin reads.
+
+    Oracle round 312 (raw_wt cells): `.qa(qi).qb.qd(0).qc = 1` under WITH
+    compiles to `54 e2` and then, byte for byte, the run `qo.qa(qi).qb.qd(0).qc
+    = 1` writes behind its `54 f4 <qo>` — the r78-withref identity holds for
+    puts. The object twin's second link yields to `_dec_object_chain` (r78-
+    twocall, r86-oc); the WITH twin read the first link alone and refused the
+    hop run, the third link, the bracket closer and the tail hops behind it
+    (round 309 w26). Read only where both decode passes refused, with the
+    twin's gate: at least two links, ending on a property or an argument list.
+
+    Returns the assignment, or None."""
+    end = len(buf)
+    if end < 8 or buf[0] != S.ASSIGN or buf[1] != S.WITHREF:
+        return None
+    _SYM_SEEN.clear()
+    if _EXPR_STR_AT is not None:
+        _EXPR_STR_AT.clear()
+    try:
+        j = 2
+        hops = []
+        while j + 3 <= end and buf[j] == S.MEMBER:
+            hops.append(_sym(syms, S.u16(buf, j + 1)))
+            j += 3
+        if j + 6 > end or buf[j] != S.ARRAY_ELEM_CALL or buf[j + 3] != S.FC:
+            return None
+        node, k = _dec_object_chain(buf, j, end, syms, recv=[""] + hops)
+        if len(node.calls) < 2 or not (node.tail or node.calls[-1][1]):
+            return None
+        if k + 1 >= end or buf[k] != 0x10 or buf[k + 1] != S.FC:
+            return None
+        ves, vk = _dec_expr(buf, k + 2, end, syms)
+        if len(ves) != 1 or vk != end:
+            return None
+        return Assign(node, ves[0])
+    except Unsupported:
+        return None
+
+
 _FOLD_BARREN = (ArrayElement, IndexedElemRef, ObjectChain, MidCall,
                 MethodCall, Call, ChainRecv, WithMemberPath, ByrefCall)
 
@@ -6809,6 +7983,14 @@ def _dec_group_run(buf, i, end, syms, stack, opens_first_packet=False):
                 # (43 f4 f4 f6): valid FoxPro that calls something else.
                 recv = stack.pop()
                 withp = isinstance(recv, WithMemberPath)
+                if not withp and stack and isinstance(stack[-1], MidCall) \
+                        and stack[-1].prop is None:
+                    # r309-withchain: the hop run stands on an `e5`-closed
+                    # link's value, which is its root, not an argument
+                    # (`.qa(qi).qb.qd(0)` wires `… e2 e5 <qa> f4 <qb> f6
+                    # <qd>`, oracle round309_cells w23).
+                    return MethodCall([stack.pop()] + recv.names, name,
+                                      stack), j + 3
                 return MethodCall(recv.names, name, stack, recv_with=withp), j + 3
             if byref_close_pending:
                 # r38 M3/a0004: this group is the measured nested
@@ -8834,9 +10016,11 @@ def _dec_define_bar(buf, end, syms):
         raise Unsupported("DEFINE BAR popup form")
     prompt = style = message = key = skip_for = picture = None
     skip_bare = False
+    prompt_tap = _sym_tap()
     if j < end and buf[j] == S.BAR_PROMPT_MARK:
         j += 1
-        prompt, j = _fc_group(buf, j, end, syms)
+        with prompt_tap:
+            prompt, j = _fc_group(buf, j, end, syms)
     font = []
     if j < end and buf[j] == S.DEFINE_WIN_FONT:
         # r53-barhead: FONT sits between PROMPT and STYLE and carries a face
@@ -8910,9 +10094,11 @@ def _dec_define_bar(buf, end, syms):
         if j < end and buf[j] == S.ARGJOIN:
             label, j = _fc_group(buf, j + 1, end, syms)
         key = (key_text, label)
+    picture_tap = _sym_tap()
     if j < end and buf[j] == S.BAR_PICTURE_MARK:
         j += 1
-        picture, j = _fc_group(buf, j, end, syms)
+        with picture_tap:
+            picture, j = _fc_group(buf, j, end, syms)
     pictres = None
     if j < end and buf[j] == S.BAR_PICTRES_MARK:
         # r43-pictres: PICTRES <sysbar> is 5f fc ec <id> [fd]; PICTRES 1 is
@@ -8931,12 +10117,31 @@ def _dec_define_bar(buf, end, syms):
     if j != end:
         raise Unsupported(
             "DEFINE BAR clause 0x%02x unmeasured" % buf[j])
+    # r303-barpicture: `PROMPT a.b PICTURE a.c` and `PICTURE a.c PROMPT a.b`
+    # compile to one frame and the table follows the source (oracle round
+    # 303 z01/z02), so a PICTURE that introduces a name below every name the
+    # PROMPT introduces was written first. Only the two-clause bar was
+    # measured. A name both clauses use was interned by whichever came first,
+    # so each clause is read by the names only it uses.
+    def _own_first(tap, other):
+        if _SYM_TABLE_HI is None:
+            return None
+        new = [i for i in tap.idx if i > _SYM_TABLE_HI and i not in other.idx]
+        return min(new) if new else None
+    pn = _own_first(picture_tap, prompt_tap)
+    qn = _own_first(prompt_tap, picture_tap)
+    picture_first = (pn is not None and qn is not None and pn < qn
+                     and style is None and message is None and key is None
+                     and skip_for is None and not skip_bare and pictres is None
+                     and neighbour is None and not font and scheme is None
+                     and mark is None)
     return DefineStmt("BAR", bar_num=bar_num, of_popup=of_popup, prompt=prompt,
                       style=style, message=message, key=key,
                       skip_for=skip_for, skip_bare=skip_bare,
                       picture=picture, pictres=pictres,
                       neighbour=neighbour, neighbour_word=neighbour_word,
-                      font=font, scheme=scheme, mark=mark)
+                      font=font, scheme=scheme, mark=mark,
+                      picture_first=picture_first)
 
 
 def _dec_define_pad(buf, end, syms):
@@ -9212,6 +10417,47 @@ def _create_array(buf, j, end, syms, clause):
     return _dec_create_array_operand(buf, j, end, syms)
 
 
+def _create_type_bracketed(syms, name, fidx, tchar) -> bool:
+    """r312-brackettype: did the source write the first field's type in brackets?
+
+    Oracle round312_cells kb02-kb19 (round 309 k14-k18): `CREATE CURSOR cq (fa
+    [c](12), ...)` numbers C right behind the cursor name and the first field
+    (CQ FA C), where `fa c(12)`, `fa 'c'(12)` and `fa "c"(12)` number nothing;
+    `[c]` and `'c'` both store `fb "c"`, and `[CHAR]` stores what bare CHAR
+    does. Only the first field's type is numbered (kb01, kb20), only behind a
+    bare field name (kb04-kb06 number nothing) and only with nothing between
+    the target name and the list (FREE, kb08, and a name expression, kb18,
+    number nothing); an old field name leaves the type behind the cursor name
+    (kb17). A type word already in the table is a tie (kb09). The target must
+    be a plain name, which numbers itself and nothing else.
+    """
+    if _SYM_TABLE_HI is None or not tchar.isalpha() \
+            or not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        # a path target (`c:\x\t`) numbers words of its own, unmeasured here
+        return False
+    w = _table_new_index(syms, tchar.upper())
+    if w is None or _claimed_earlier(w) or _spelled_earlier(syms, w):
+        return False
+
+    def free(slot):
+        while _spelled_earlier(syms, slot) or _claimed_earlier(slot):
+            slot += 1
+        return slot
+
+    # the table numbers the target, then the first field, then the type
+    slot = free(_SYM_TABLE_HI + 1)
+    t = _table_new_index(syms, name.upper())
+    if t is not None and not _spelled_earlier(syms, t) and not _claimed_earlier(t):
+        if t != slot:
+            return False
+        slot = free(slot + 1)
+    if fidx > _SYM_TABLE_HI:
+        if fidx != slot:
+            return False
+        slot = free(slot + 1)
+    return w == slot
+
+
 def _dec_create_cursor(buf, end, syms):
     # round-26 c1/c2 byte-exact base, widened round-28 W4 along measured
     # shapes only. Second byte 0xBD = CREATE CURSOR, 0x31 = CREATE TABLE
@@ -9244,11 +10490,32 @@ def _dec_create_cursor(buf, end, syms):
         raise Unsupported("CREATE CURSOR field list missing")
     j += 1
     fields = []
+    type_word = None
     while True:
+        fmark = buf[j] if j < end else None
+        fidx = S.u16(buf, j + 1) if fmark == S.SYM and j + 3 <= end else None
         fname, j = bank.read_one(S.CREATE_FIELD_NAME, buf, j, end, syms)
+        tmark = buf[j] if j < end else None
         tchar, j = bank.read_one(S.CREATE_FIELD_TYPE, buf, j, end, syms)
         values, j = bank.read(S.CREATE_FIELD, buf, j, end, syms, verb)
-        fields.append((fname, str(tchar).upper(), values))
+        tchar = str(tchar)
+        if not fields and tmark == S.STR and buf[2] == S.STR and not clauses \
+                and fidx is not None \
+                and _create_type_bracketed(syms, str(name), fidx, tchar):
+            # r312-brackettype: the table numbers the type word, so the
+            # source wrote it in brackets
+            type_word = tchar.upper()
+            tchar = "[%s]" % tchar
+        elif tmark == S.STR2 or tchar != tchar.upper():
+            # r309-createtype: a bare type word compiles to its uppercase under
+            # `fb`; a quoted one keeps its case and its quote (`'char'` and
+            # `[char]` store fb "char", `"numeric"` d9 "numeric"; oracle
+            # round309_cells k12, k13, k17 against k01-k11). A payload the bare
+            # word cannot write is spelled quoted.
+            tchar = _emit_vfp_string(tchar, tmark == S.STR2)
+        else:
+            tchar = tchar.upper()
+        fields.append((fname, tchar, values))
         if j >= end:
             raise Unsupported("CREATE CURSOR field list unterminated")
         if buf[j] == 0x07:
@@ -9260,7 +10527,8 @@ def _dec_create_cursor(buf, end, syms):
         raise Unsupported("CREATE CURSOR field tail 0x%02x" % buf[j])
     if j != end:
         raise Unsupported("CREATE CURSOR trailing bytes")
-    return CreateCursor(str(name), fields, clauses, table=(verb == "TABLE"))
+    return CreateCursor(str(name), fields, clauses, table=(verb == "TABLE"),
+                        type_word=type_word)
 
 
 def _dec_create_array_operand(buf, j, end, syms):
@@ -9598,15 +10866,46 @@ def _dec_sub_statement(buf, syms):
     nested call and the statement high-water comes back as the higher of the
     two, which is what the enclosing statement's own accounting expects.
     """
-    global _SYM_STMT_HI, _SYM_STMT_LO, _EXPR_RETRY_ACTIVE
+    global _SYM_STMT_HI, _SYM_STMT_LO, _EXPR_RETRY_ACTIVE, _SQL_SPLICED_BODY
+    global _SQL_DISTINCT_WORD, _SYM_TABLE_HI, _SYM_SPELLED
     saved_hi, saved_lo = _SYM_STMT_HI, _SYM_STMT_LO
+    # r305-intowhere: the body is part of the enclosing statement, so what it
+    # resolves and spells is not an EARLIER statement's. Its statement edge
+    # must not fold its names into the section high-water or the spelled set
+    # while the enclosing statement is still being read (oracle round 305
+    # i02/i05/i07/i09: `SELECT * FROM a INTO CURSOR c WHERE f NOT IN (SELECT
+    # ...)` numbers c ahead of the WHERE's names; with the fold the INTO name
+    # read as old and INTO stayed last).
+    saved_table_hi = _SYM_TABLE_HI
+    saved_spelled = set(_SYM_SPELLED) if _SYM_SPELLED is not None else None
+    saved_seen = list(_SYM_SEEN)
     saved_retry = _EXPR_RETRY_ACTIVE
+    saved_spliced = _SQL_SPLICED_BODY
+    # r303-distslot: the enclosing statement's DISTINCT spelling survives the
+    # spliced body, which spells its own (oracle round 303 `s08`: the outer
+    # word of a SELECT with a subquery is the outer's table entry).
+    saved_word = _SQL_DISTINCT_WORD
+    pre = _SQL_DISTINCT_PREPASS
+    saved_top = pre["top"] if pre is not None else None
+    if pre is not None:
+        # r303-distslot: a spliced body's word writes no entry (`s09`, `s13`).
+        pre["top"] = False
+    _SQL_SPLICED_BODY = True
     try:
         return dec_statement(buf, syms)
     finally:
+        if pre is not None:
+            pre["top"] = saved_top
         _SYM_STMT_HI = max(saved_hi, _SYM_STMT_HI)
         _SYM_STMT_LO = saved_lo if saved_lo is not None else _SYM_STMT_LO
+        _SYM_TABLE_HI = saved_table_hi
+        if saved_spelled is not None:
+            _SYM_SPELLED = saved_spelled
+        # nor forget what the enclosing statement resolved before it
+        _SYM_SEEN[:0] = saved_seen
         _EXPR_RETRY_ACTIVE = saved_retry
+        _SQL_SPLICED_BODY = saved_spliced
+        _SQL_DISTINCT_WORD = saved_word
 
 
 def _dec_insert_array_operand(buf, j, end, syms):
@@ -10472,8 +11771,104 @@ def _dec_sql_like_cond(buf, i, end, syms):
 
 
 def _dec_statement_checked(buf, syms):
+    global _SYM_CLAIMED, _SYM_STMT_HI, _SYM_STMT_LO
+    claimed = _SYM_CLAIMED
+    if claimed and buf[:1] == bytes([S.REPLACE_LEAD]):
+        # r305-scopeclaim: ties keep main's text. Read the statement first as
+        # main reads it (no claimed slots); if that spelling interns the same
+        # new scope words as the claim-aware one, the table cannot tell them
+        # apart and main's spelling stands.
+        hi, lo, seen = _SYM_STMT_HI, _SYM_STMT_LO, list(_SYM_SEEN)
+        _SYM_CLAIMED = None
+        try:
+            plain = _dec_statement_flags(buf, syms)
+        except Unsupported:
+            plain = None
+        finally:
+            _SYM_CLAIMED = claimed
+            _SYM_STMT_HI, _SYM_STMT_LO = hi, lo
+            _SYM_SEEN[:] = seen
+        ast = _dec_statement_flags(buf, syms)
+        if plain is not None and isinstance(ast, ReplaceStmt) \
+                and _new_scope_slots(syms, plain) == _new_scope_slots(syms, ast) \
+                and not _for_moved_ahead(syms, plain, ast) \
+                and not _all_moved_ahead(syms, plain, ast) \
+                and not _spells_absent_word(syms, plain, ast) \
+                and not _in_moved_ahead(plain, ast):
+            ast = plain
+        _claim_scope_words(syms, ast)
+        return ast
+    ast = _dec_statement_flags(buf, syms)
+    _claim_scope_words(syms, ast)
+    return ast
+
+
+def _for_moved_ahead(syms, plain, ast) -> bool:
+    """r308-forahead: the claim-aware reading writes a FOR of this statement's
+    ahead of the fields and main's reading behind them.
+
+    Not a tie: a new FOR written ahead of new field names takes a lower slot
+    than one written behind them (oracle round 308 c12, c20), though both
+    spellings newly take the same scope slots."""
+    return bool(ast.for_ahead and not plain.for_ahead
+                and _unclaimed_new_index(syms, "FOR") is not None)
+
+
+def _all_moved_ahead(syms, plain, ast) -> bool:
+    """r312-allahead: the claim-aware reading writes ALL ahead of the fields
+    and main's reading behind them.
+
+    Not a tie: ALL written ahead of a new field name takes the slot below it,
+    and written behind it the slot above, though both spellings newly take the
+    same scope slot. Oracle round 312 rc01, rc02, rc05 (round 308 n14): after
+    `REPLACE qa WITH 1 FOR qa = 1` claimed FOR, `REPLACE ALL qc WITH qc + 1
+    FOR qc >= qb [NOOPTIMIZE]` numbers ALL below the new QC."""
+    if not (ast.all_scope and ast.all_first and not plain.all_first):
+        return False
+    a = _unclaimed_new_index(syms, "ALL")
+    return a is not None and ast.fields_lo is not None and a < ast.fields_lo
+
+
+def _spells_absent_word(syms, plain, ast) -> bool:
+    """r312-allahead: main's reading spells a scope word the table does not
+    hold, and the claim-aware reading spells none.
+
+    Not a tie: the word main writes first behind the fields would be numbered
+    on recompile. Oracle round 312 rc09, rc10: behind a FOR an earlier
+    statement numbered, `NOOPTIMIZE` and `ALL` have no entry, and main's
+    `ALL NOOPTIMIZE FOR c` interns one of them."""
+    have = {x.upper() for x in syms if isinstance(x, str)}
+    return any(w not in have for w in _scope_words(plain)) \
+        and all(w in have for w in _scope_words(ast))
+
+
+def _in_moved_ahead(plain, ast) -> bool:
+    """r312-inahead: the claim-aware reading writes IN ahead of the fields and
+    main's reading behind them.
+
+    Not a tie: the alias the table numbers below the fields is numbered
+    behind them by main's spelling, though both spellings newly take the
+    same scope slots (oracle round 312 ri11, ri12)."""
+    return bool(getattr(ast, "in_ahead", None)
+                and not getattr(plain, "in_ahead", None))
+
+
+def _new_scope_slots(syms, ast):
+    """r305-scopeclaim: the table slots this spelling's scope words newly take."""
+    out = set()
+    for w in _scope_words(ast):
+        hits = [i for i, x in enumerate(syms) if isinstance(x, str) and x.upper() == w]
+        if len(hits) == 1 and hits[0] > (_SYM_TABLE_HI if _SYM_TABLE_HI is not None
+                                         else -1) \
+                and not _claimed_earlier(hits[0]):
+            out.add(hits[0])
+    return out
+
+
+def _dec_statement_flags(buf, syms):
+    mark = len(_SYM_SEEN)
     try:
-        return _dec_statement(buf, syms)
+        ast = _dec_statement(buf, syms)
     except (IndexError, _struct.error) as e:
         # A truncated/odd shape is an UNSUPPORTED statement, not a crash — same discipline as
         # the reader: one statement's failure must cost one statement.
@@ -10483,6 +11878,20 @@ def _dec_statement_checked(buf, syms):
         # per group), so a hostile or corrupted stream can exhaust the Python stack. A stack
         # blowout is one unrecognised construct like any other — Unsupported, never a crash.
         raise Unsupported("statement nesting exceeds recursion budget") from e
+    if isinstance(ast, ReplaceStmt):
+        ast.in_before_all = _replace_in_before_all(syms, ast)
+        if _replace_all_first_in(syms, ast) or _replace_all_noopt_ahead(syms, ast):
+            ast.all_first = True
+        ast.for_bracket = _replace_for_bracket(syms, ast)
+        if ast.for_bracket and ast.nooptimize:
+            ast.noopt_after_for = True
+        ast.for_ahead = _replace_for_ahead(syms, ast)
+        if not ast.for_ahead:
+            first = _replace_for_ahead_scope(syms, ast)
+            if first is not None:
+                ast.for_ahead, ast.for_ahead_first = True, first
+        ast.in_ahead = _replace_in_ahead(syms, ast, _SYM_SEEN[mark:])
+    return ast
 
 
 # Round-86 law 1 (r86-cast, probes/oracle_harvest/round86_cast_streams.json):
@@ -10984,8 +12393,92 @@ where it is 0 the reader spells exactly as it did before this law."""
 def _sql_distinct_names(sec_statements, syms) -> int:
     """The surplus of DIST* symbol-table entries over possible DISTINCT words."""
     entries = sum(1 for s in syms if s.upper() in _SQL_DISTINCT_SPELLINGS)
-    words = sum(1 for st in sec_statements if S.SQL_DISTINCT_MARK in st.stream)
+    words = sum(1 for st in sec_statements if S.SQL_DISTINCT_MARK in st.stream
+                or _sql_agg_first_distinct(st.stream))
     return max(0, entries - words)
+
+
+_SQL_DISTINCT_PLAN = None
+"""r303-distslot: the spelling each DISTINCT statement of this SECTION writes,
+in walk order, or None where the section gives no plan.
+
+VFP9 records a DISTINCT spelling once, the first time it is written, at the
+SELECT keyword: ahead of every name the statement introduces, after every name
+an earlier statement resolved (oracle round 303, `s04_distin_distin_dist`:
+X0 DISTIN QA QT QC QB QU QD DIST QE ...; `t01`-`t07`: an old projection still
+puts the word before the statement's first new name). A statement that writes
+a spelling already in the table adds nothing. Only the top-level projection's
+word is recorded: a subquery's (`s09`, `t08`) and INSERT ... SELECT's (`s13`)
+leave no entry. So the k-th DISTINCT statement does not take the k-th entry: it
+takes an entry only when one lies between the section's high-water before it
+and the first name it or a later statement introduces, and otherwise repeats a
+spelling the table already holds."""
+
+_SQL_DISTINCT_PREPASS = None
+"""r303-distslot: the first walk's record — every resolved index in walk order,
+and per DISTINCT statement the offset into it where that statement began and
+whether its own projection carries the word (`6f be`)."""
+
+
+def _sql_bare_star_unspelled(buf, syms) -> bool:
+    """r303-starfrom: `SELECT DISTINCT * FROM t` in a table with no FROM entry.
+
+    Only the word after the table name gives that table, and it interns no
+    DIST* word either (round 278 q_star_after), so the statement owns no entry.
+    """
+    if len(buf) < 7 or buf[2] != 0x15 or buf[3] != S.STR:
+        return False
+    k = 6 + S.u16(buf, 4)
+    if k >= len(buf) or buf[k] != 0xC7:
+        return False
+    return not any(isinstance(x, str) and x.upper() == "FROM" for x in syms)
+
+
+def _sql_distinct_plan(refs, words, syms, spelled_at=()):
+    """r303-distslot: per DISTINCT statement, the spelling it wrote."""
+    hits = [(i, s) for i, s in enumerate(syms)
+            if s.upper() in _SQL_DISTINCT_SPELLINGS]
+    if not hits:
+        return None
+    plan, owned = [], set()
+    last = None
+    for start, top, spelled in words:
+        hi = max(refs[:start], default=-1)
+        # An entry an earlier statement spelled as a string (any name it wrote
+        # as a string, FROM and INTO names among them) was numbered by that
+        # statement, though no operand raised the high-water for it
+        # (r293-intoorder).
+        later = [r for r in refs[start:] if r > hi
+                 and not (isinstance(syms[r], str)
+                          and syms[r].casefold() in spelled)]
+        later += [i for at, i in spelled_at if at >= start and i > hi
+                  and syms[i].casefold() not in spelled]
+        lo = min(later) if later else None
+        word = None
+        if not top:
+            # A subquery's or INSERT ... SELECT's word leaves no entry
+            # (`s09`, `s13`), so any spelling recompiles the same table.
+            plan.append(last or hits[0][1])
+            continue
+        if top:
+            for i, w in hits:
+                if i > hi and (lo is None or i < lo) and i not in owned:
+                    owned.add(i)
+                    word = last = w
+                    break
+        if word is None:
+            # A repeat: any spelling the table already holds at this point
+            # recompiles the same table — the latest one this section's
+            # statements wrote, else a NAME spelled like the word.
+            if last is not None:
+                word = last
+            else:
+                old = [w for i, w in hits if i <= hi]
+                if not old:
+                    return None
+                word = old[-1]
+        plan.append(word)
+    return plan
 
 
 def _sql_distinct_word(syms, advance=True):
@@ -10996,6 +12489,11 @@ def _sql_distinct_word(syms, advance=True):
     if not hits:
         return "DISTINCT"
     k = _SQL_DISTINCT_N or 0
+    if (_SQL_DISTINCT_PLAN is not None and _SQL_DISTINCT_N is not None
+            and k < len(_SQL_DISTINCT_PLAN)):
+        if advance:
+            _SQL_DISTINCT_N = k + 1
+        return _SQL_DISTINCT_PLAN[k]
     # r74-distinctname: an entry an EARLIER statement resolved as an operand
     # was introduced by a NAME — the tokenizer writes the clause word where
     # the SELECT stands, so the word's own entry sits above every index the
@@ -11023,6 +12521,10 @@ def _sql_stmt_distinct_word(syms):
     """
     global _SQL_DISTINCT_WORD
     if _SQL_DISTINCT_WORD is None:
+        if _SQL_DISTINCT_PREPASS is not None:
+            # r303-distslot: the first walk records where this statement began.
+            pre = _SQL_DISTINCT_PREPASS
+            pre["words"].append((pre["start"], pre["top"], pre["spelled"]))
         _SQL_DISTINCT_WORD = _sql_distinct_word(syms)
     return _SQL_DISTINCT_WORD
 
@@ -11068,14 +12570,57 @@ def _sql_count_name(name, syms, buf):
     return _sql_count_abbr_from([buf], syms) or name
 
 
-def _sql_agg_distinct_word():
+def _sql_first_col_at(buf) -> int:
+    """Offset of the first projection column of `6f 15 fb <t> [51 f7 <alias>] fc`.
+
+    r308-aggclose: an aliased FROM table (`fb <t> 51 f7 <alias>`, oracle round
+    308 a46) leaves the aggregate opening the projection, and the table interns
+    its COUNT and DIST* words there as it does with a bare table."""
+    k = 5 + S.u16(buf, 3)
+    if k + 4 <= len(buf) and buf[k] == 0x51 and buf[k + 1] == S.SYM:
+        k += 4
+    return k
+
+
+def _sql_agg_leads(buf, i) -> bool:
+    """r305-aggfirst: does the aggregate opening at i open the first projection
+    column of a top-level `SELECT ... FROM t` (`6f 15 fb <t> fc 43 ...`)?"""
+    if _SQL_SPLICED_BODY or len(buf) < 6 or buf[0] != 0x6F or buf[1] != 0x15 \
+            or buf[2] != S.STR:
+        return False
+    k = _sql_first_col_at(buf)
+    return k + 1 == i and k < len(buf) and buf[k] == S.FC
+
+
+def _sql_agg_first_distinct(buf) -> bool:
+    """r305-aggfirst: the statement's first column is `COUNT(DIST* x)` or kin."""
+    if len(buf) < 6 or buf[:1] != b"\x6f" or buf[1] != 0x15 or buf[2] != S.STR:
+        return False
+    k = _sql_first_col_at(buf)
+    return (buf[k:k + 2] == bytes([S.FC, S.CALL_OPEN])
+            and _sql_agg_leads(buf, k + 1)
+            and buf[k + 2:k + 4] == bytes([S.ESCAPE, S.SQLSEL_AGG_DISTINCT]))
+
+
+def _sql_agg_distinct_word(syms=None, buf=None, i=None):
     """The word a `COUNT(DISTINCT x)` spells — the statement's, if it has one.
 
-    r74-distinctname: an aggregate's DISTINCT with no projection DISTINCT
-    beside it leaves NO symbol-table entry at all, so its letters are not
-    recoverable and it may not spend a later statement's entry. It is written
-    in full, which is what the measured rows that spell it in full hold anyway.
+    r305-aggfirst (oracle round 305, cells a01-a28): where the aggregate sits
+    in a later column, its DISTINCT leaves NO symbol-table entry (round 74's
+    `bk_agg_only_*`: `SELECT id, COUNT(DIST n)`; round 305 a04-a06, a13), so
+    its letters are not recoverable and it may not spend a later statement's
+    entry; it is written in full. Where the aggregate OPENS the projection the
+    compiler reads it where a projection DISTINCT would stand and interns its
+    word the way a projection word is interned (round 303 `s14`, `x04`,
+    `x05`; round 305 a01-a03, a07, a16, a18, a25, a26: COUNT, SUM and CNT
+    intern their own name too, which the emitted name reproduces). That word
+    is then the statement's one entry, read like a projection word. A
+    projection DISTINCT beside it (a19, a20) or a leading ALL (a21) leaves
+    the aggregate's word unrecorded.
     """
+    if (_SQL_DISTINCT_WORD is None and syms is not None
+            and _sql_agg_leads(buf, i)):
+        return _sql_stmt_distinct_word(syms)
     return _SQL_DISTINCT_WORD or "DISTINCT"
 
 
@@ -11112,15 +12657,15 @@ def _try_sql_agg(buf, i, end, syms):
         inner = _sym(syms, S.u16(buf, j + 1))
         j += 3
     else:
-        return _sql_agg_expr(buf, arg_start, end, syms, distinct)
+        return _sql_agg_expr(buf, arg_start, end, syms, distinct and i)
     if j + 1 >= end or buf[j] != S.ESCAPE:
-        return _sql_agg_expr(buf, arg_start, end, syms, distinct)
+        return _sql_agg_expr(buf, arg_start, end, syms, distinct and i)
     name = S.SQLSEL_AGG.get(buf[j + 1])
     if name is None:
-        return _sql_agg_expr(buf, arg_start, end, syms, distinct)
+        return _sql_agg_expr(buf, arg_start, end, syms, distinct and i)
     j += 2
     if distinct:
-        inner = _sql_agg_distinct_word() + " " + inner
+        inner = _sql_agg_distinct_word(syms, buf, i) + " " + inner
     return SqlAgg(_sql_count_name(name, syms, buf), inner), j
 
 
@@ -11176,13 +12721,26 @@ def _dec_sql_from_table(buf, j, end, syms):
                 p += 3
                 if p >= end or buf[p] != 0x03:
                     raise Unsupported("SQL FROM table unresolved")
-                return "(%s)" % ".".join(names), p + 1
+                p += 1
+                # r302-fromclose: the paren group's own fd closer. The generic
+                # fc-FROM branch below consumes it; this member form left it, so
+                # the bare `c7` star behind it reached the INTO forward scan and
+                # the `fd c7` was skipped (chartadjust.scx 127/128, oracle
+                # round302_cells from_mv). Consume it here so the walk abuts.
+                if p < end and buf[p] == S.FD:
+                    p += 1
+                return "(%s)" % ".".join(names), p
             raise Unsupported("SQL FROM table unresolved")
         tes, tk = _dec_expr(buf, j + 1, end, syms,
                             stop_bytes=_IF_COND_STOP)
         if len(tes) != 1 or tk >= end or buf[tk] != S.FD:
             raise Unsupported("SQL FROM table unresolved")
-        ent = tes[0].text if isinstance(tes[0], Str) else _emit(tes[0])
+        # r312-quotedfrom: a string the source wrapped in quotes or brackets
+        # is stored `fc fb|d9 <s> fd`, a bare name `fb <s>` with no group
+        # (oracle round 312 fq01-fq20). The quoted spelling numbers no
+        # entry for the table and the bare one does (fq01 X0 QC QD QT QA,
+        # fq04 X0 QT QC QD QA), so the group's string keeps its quotes.
+        ent = _emit(tes[0])
         return ent, tk + 1
     if j < end and buf[j] == S.SQL_SUBQUERY:
         node, j2 = _dec_sql_subquery(buf, j, end, syms)
@@ -11274,7 +12832,65 @@ def _star_intern_neither(syms) -> bool:
     upper = {s.upper() for s in syms}
     if "FROM" in upper:
         return False
-    return not (upper & set(_SQL_DISTINCT_SPELLINGS))
+    # r303-starfrom: every front spelling interns FROM after its word
+    # (oracle round 303 `k02`-`k05`, `s11`, and `k06` with the word already
+    # in the table), so a table without FROM rules the front word out even
+    # where another statement's DIST* word is in it (r303-distslot gives
+    # that entry to its own statement).
+    return True
+
+
+def _sql_trailing_keywords(distinct, top_n, has_cols, order_terms, to_txt,
+                           display, syms):
+    """r298-sqltrail: (DISTINCT after the FROM list, TOP n after ORDER BY).
+
+    Written ahead of the projection, DISTINCT interns a DIST* entry and TOP
+    interns TOP (the latter only when no DISTINCT precedes it). Written after
+    the FROM list (DISTINCT) or after the ORDER BY terms (TOP), neither word
+    is interned and the frame is the same (oracle round298_sqltrail.json:
+    fourteen leading/trailing pairs, frames equal with operands resolved).
+    A section table without the entry therefore proves the trailing
+    spelling. Measured for a column projection with WHERE, JOIN ... ON,
+    GROUP BY/HAVING, ORDER BY, INTO CURSOR/ARRAY and READWRITE, and for a
+    literal TOP n with ORDER BY on either side of INTO or WHERE. A star
+    projection keeps round 278's rule. A subquery body and an INSERT INTO …
+    SELECT body intern neither word in either position (cells s4, i1, i2), so
+    they are ties and keep the leading spelling, as do a TO display and an
+    unparsed table.
+    """
+    if not syms or _SQL_SUBQUERY_BODY or _SQL_SPLICED_BODY or to_txt or display:
+        return False, False
+    upper = {s.upper() for s in syms}
+    trail_distinct = bool(distinct and has_cols
+                          and not (upper & set(_SQL_DISTINCT_SPELLINGS)))
+    lead_distinct = distinct and not trail_distinct
+    trail_top = bool(top_n is not None and order_terms and not lead_distinct
+                     and "TOP" not in upper and _emit(top_n).isdigit())
+    return trail_distinct, trail_top
+
+
+_SQL_GROUP_NEW = []
+"""r303-groupwhere: the indexes the SELECT being decoded first resolved in its
+GROUP BY, above the section high-water. Set by the reader just before the
+statement text is built."""
+
+
+def _sql_group_before_where(group_terms, where_new, having_expr, syms) -> bool:
+    """r303-groupwhere: was GROUP BY written ahead of WHERE?
+
+    Oracle round 303 w01/w02/w03: `... FROM t WHERE e = 0 GROUP BY a, d` and
+    `... FROM t GROUP BY a, d WHERE e = 0` compile to one frame and the table
+    numbers each clause's names where the source wrote them. A name both
+    clauses use belongs to whichever came first, so each is read by the names
+    only it introduces. HAVING was not measured and keeps WHERE first.
+    """
+    if not group_terms or not where_new or having_expr is not None \
+            or _SYM_TABLE_HI is None:
+        return False
+    # A name the WHERE already resolved is not in the GROUP BY's list, and
+    # a projection name is in neither.
+    g = _unspelled(syms, _SQL_GROUP_NEW)
+    return bool(g) and min(g) < min(where_new)
 
 
 def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
@@ -11284,7 +12900,7 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
                        cur_literal, where_new, cols_after=None,
                        star_mid=False, star_mid_txt="*",
                        order_before_where=False, into_array_new=(),
-                       order_new=None):
+                       order_new=None, top_percent=False, select_all=False):
     """The SELECT statement text, once every clause has been read.
 
     ``star_mid`` is a star that sits between two column groups
@@ -11293,9 +12909,20 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
     lowest name the ORDER BY introduces, None when it introduces none.
     """
     sel_kw = ["SELECT"]
+    if select_all:
+        # r308-selectall: measured with a column, star or aggregate projection
+        # and no DISTINCT or TOP
+        if distinct or top_n is not None:
+            raise Unsupported("SQL SELECT ALL with DISTINCT or TOP unmeasured")
+        sel_kw.append("ALL")
     trail_distinct = ""
     cols_after = list(cols_after or [])
-    if distinct:
+    trail_cols_distinct, trail_top = _sql_trailing_keywords(
+        distinct, top_n, cols or cols_after or star_mid, order_terms,
+        to_txt, display, syms)
+    if distinct and trail_cols_distinct:
+        trail_distinct = _SQL_DISTINCT_WORD or "DISTINCT"
+    elif distinct:
         word = _SQL_DISTINCT_WORD or "DISTINCT"
         # The front spelling interns both words. These rows stored
         # neither, and the only measured spelling that does that is the
@@ -11310,8 +12937,10 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
             trail_distinct = word
         else:
             sel_kw.append(word)
-    if top_n is not None:
-        sel_kw.append("TOP %s" % _emit(top_n))
+    top_word = "" if top_n is None else "TOP %s%s" % (
+        _emit(top_n), " PERCENT" if top_percent else "")
+    if top_n is not None and not trail_top:
+        sel_kw.append(top_word)
     top_txt = " ".join(sel_kw) + " "
     if cols or cols_after or star_mid:
         parts = [_emit_select_col(e) + (f" AS {a}" if a else "")
@@ -11331,6 +12960,8 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
                      for e, a in cols_after)
         head = top_txt + ", ".join(parts) \
             + ((", " + star_tail_txt) if star_extra else "") + f" FROM {tbl}"
+        if trail_distinct:
+            head += " " + trail_distinct
     else:
         # star-form: no explicit columns means SELECT * FROM ...
         # r236-midstar: two qualified stars and nothing else
@@ -11356,11 +12987,40 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
     if order_terms:
         order_txt = " ORDER BY " + ", ".join(
             _emit(t) + (" DESC" if d else "") for t, d in order_terms)
+        if trail_top:
+            order_txt += " " + top_word
+    # r305-orderfrom: VFP9 takes ORDER BY ahead of FROM, and the table
+    # numbers its names there, ahead of the FROM table's entry (oracle round
+    # 305 f01-f06: `SELECT a AS b ORDER BY d FROM t WHERE c = 1` interns A B
+    # D T C; every other placement puts T ahead of D). So a new ORDER name
+    # below the statement's own new FROM entry says ORDER BY came first. Only
+    # a plain one-table FROM with no GROUP BY, HAVING or trailing word, and
+    # only with an ORDER BY (WHERE ahead of FROM alone is not measured).
+    if (order_txt and order_new is not None and not group_terms
+            and having_expr is None and not trail_distinct and not trail_top
+            and head.endswith(" FROM " + str(tbl))):
+        from_idx = _table_new_index(syms, str(tbl))
+        if from_idx is not None and order_new < from_idx:
+            # A WHERE whose new names also stand below the FROM entry was
+            # written ahead of it too, in the order the names say (f04, f05).
+            ahead = [(order_new, order_txt)]
+            w_lo = min(where_new, default=None) if where_txt else None
+            if w_lo is not None and w_lo < from_idx:
+                ahead.append((w_lo, where_txt))
+                where_txt = ""
+                where_new = []
+            head = (head[:-len(" FROM " + str(tbl))]
+                    + "".join(t for _, t in sorted(ahead)) + " FROM " + str(tbl))
+            order_txt = ""
+            order_before_where = False
+            order_new = None
     # r271-orderfirst: ORDER BY before WHERE when the symbol table says
     # the ORDER names were written first. GROUP BY and HAVING stay where
     # the wire put them; the flag is refused for those shapes.
     if order_before_where:
         rest = order_txt + where_txt + group_txt + having_txt
+    elif _sql_group_before_where(group_terms, where_new, having_expr, syms):
+        rest = group_txt + where_txt + having_txt + order_txt
     else:
         rest = where_txt + group_txt + having_txt + order_txt
     # r49-clauseorder: the compiler stores the INTO clause behind the WHERE
@@ -11393,16 +13053,54 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
         where_new = _unspelled(syms, where_new)
         into_array_new = _unspelled(syms, into_array_new)
     into_idx = _table_new_index(syms, cur_literal)
-    if order_terms and _spelled_earlier(syms, into_idx):
+    # r305b-literalname: an INTO cursor that is the FROM table was numbered by
+    # FROM whichever order the source wrote (oracle round 305 s54-s57: both
+    # spellings store one table). The table cannot place it, so it keeps
+    # main's reading, which also counts an earlier literal of the name.
+    from_name = _re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)", str(tbl))
+    into_is_from = bool(from_name) and \
+        str(cur_literal).casefold() == from_name.group(1).casefold()
+    into_spelled = _spelled_earlier(syms, into_idx, literals=into_is_from)
+    if order_terms and into_spelled:
+        into_idx = None
+    if where_txt and "(SELECT " in where_txt and into_idx is not None and (
+            into_spelled or str(cur_literal).casefold() == str(tbl).casefold()):
+        # r305-intowhere: an INTO name an earlier statement spelled, or the
+        # FROM table's own name, was numbered before this WHERE either way.
         into_idx = None
     if into_idx is None:
         into_idx = min(into_array_new, default=None)
-    clauses = [(where_txt, min(where_new, default=None)), (order_txt, order_new)]
+    where_lo = min(where_new, default=None)
+    if where_lo is None and where_txt and "(SELECT " in where_txt \
+            and _SYM_TABLE_HI is not None:
+        # r305-intowhere: a WHERE whose operands are all old still introduces
+        # the names its subquery spells (its FROM table), numbered where the
+        # WHERE was written (oracle round 305 i16/i17).
+        sub_from = {m.casefold() for m in _re.findall(
+            r"\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)", where_txt)}
+        sub_from -= {str(tbl).casefold(), str(cur_literal).casefold()}
+        spelled = [i for i, x in enumerate(syms)
+                   if isinstance(x, str) and i > _SYM_TABLE_HI
+                   and x.casefold() in sub_from
+                   and not _spelled_earlier(syms, i)]
+        where_lo = min(spelled, default=None)
+    clauses = [(where_txt, where_lo), (order_txt, order_new)]
     if order_before_where:
         clauses.reverse()
     clauses = [c for c in clauses if c[0]]
     split = None if group_terms or having_expr is not None \
         else _into_clause_split(into_idx, clauses)
+    # r308-intofrom: INTO written ahead of FROM numbers the target ahead of
+    # the FROM table (oracle round 308 f01-f26: `SELECT * INTO CURSOR c FROM
+    # t` interns C T, `SELECT a INTO ARRAY x FROM t` A X T; every other
+    # placement puts T first). The clauses behind FROM keep their order.
+    if not trail_distinct and not to_txt and into_txt \
+            and head.endswith(" FROM " + str(tbl)) \
+            and _into_written_before_from(syms, tbl, cur_literal, into_array_new):
+        return SqlSelectColumns(
+            head[:-len(" FROM " + str(tbl))] + into_txt,
+            readwrite=readwrite, nofilter=nofilter,
+            tail_text=" FROM " + str(tbl) + rest, display=display)
     # r37 P3 (C13): the d7 tag is emitted ONCE, by _emit_line via the
     # readwrite flag — appending it here too doubled the tag on the
     # wire-visible text ('READWRITE READWRITE', rejected by VFP). The tag
@@ -11416,6 +13114,41 @@ def _sql_select_result(distinct, top_n, cols, star_leading, star_extra,
     return SqlSelectColumns(head + rest + into_txt + to_txt,
                             readwrite=readwrite, nofilter=nofilter,
                             display=display)
+
+
+def _into_written_before_from(syms, tbl, cur_literal, into_array_new) -> bool:
+    """r308-intofrom: did the source write the INTO target ahead of FROM?
+
+    The wire stores the destination behind every clause, and the table numbers
+    each name where the source wrote it (oracle round 308 f01, f03-f08, f11-f13,
+    f17-f21, f23-f25; round 305 i03, i10). The target must be this statement's
+    new entry (a literal cursor or table name no earlier statement spelled, or
+    the names an INTO ARRAY target introduces) and the first FROM table this
+    statement's new entry right above it. Anything between the two was numbered
+    by another statement (f15: a quoted FROM name numbers nothing, and a later
+    statement's names stand between), and an old name on either side is a tie
+    (f09, f10, f16, f29, f30), so both keep the stored order.
+    """
+    m = _re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*[.(])", str(tbl))
+    if m is None or _SYM_TABLE_HI is None:
+        return False
+    from_idx = _table_new_index(syms, m.group(1))
+    if from_idx is None or _spelled_earlier(syms, from_idx):
+        return False
+    if cur_literal is not None:
+        if str(cur_literal).casefold() == m.group(1).casefold():
+            return False
+        i = _table_new_index(syms, cur_literal)
+        # an operand of this statement spelling the target's name (a column
+        # alias, f27/f28) numbered it in the projection: INTO's place is a tie
+        if i is None or i in _SYM_SEEN or _spelled_earlier(syms, i):
+            return False
+        into_hi = i
+    elif into_array_new:
+        into_hi = max(into_array_new)
+    else:
+        return False
+    return from_idx == into_hi + 1
 
 
 def _dec_sql_select_dest(buf, pos, end, syms):
@@ -11542,10 +13275,20 @@ def _dec_sql_select_dest(buf, pos, end, syms):
 
 
 def _sql_agg_close(buf, i, end):
-    """Index of the fd closing the column group this aggregate opened."""
+    """Index of the fd closing the column group this aggregate opened.
+
+    r308-aggclose: an `ea <id>` pair is one callee, so its id byte is never a
+    group opener or closer. COUNT's own id is `fc` (`43 ea ff f4 <a> f7 <f> ea
+    fc fd` for `COUNT(DIST a.f)`, oracle round 308 a23, a40, a42-a47), which
+    the depth walk read as an opener, so no close was found and the column
+    was refused.
+    """
     depth = 1
     j = i
     while j < end:
+        if buf[j] == S.ESCAPE:
+            j += 2
+            continue
         if buf[j] == S.FC:
             depth += 1
         elif buf[j] == S.FD:
@@ -11578,7 +13321,8 @@ def _sql_agg_expr(buf, i, end, syms, distinct):
         return None
     inner = _emit(es[0])
     if distinct:
-        inner = _sql_agg_distinct_word() + " " + inner
+        # r305-aggfirst: `distinct` is the aggregate's own offset when set
+        inner = _sql_agg_distinct_word(syms, buf, distinct) + " " + inner
     return SqlAgg(name, inner), fd_pos
 
 
@@ -11984,8 +13728,12 @@ def dec_statement(buf, syms):
     `_dec_group_run`; statement decoding is single-threaded and never nested."""
     global _EXPR_RETRY_ACTIVE, _STMT_MIDWINDOW_FIRED, _SYM_STMT_HI
     global _SYM_TABLE_HI, _SYM_STMT_LO, _GROUP_EOW_CLOSE
-    global _SQL_DISTINCT_WORD, _SQL_DISTINCT_N, _SQL_DISTINCT_NAMES
+    global _SQL_DISTINCT_WORD, _SQL_DISTINCT_N, _SQL_DISTINCT_NAMES, _EXPR_STR_AT
     _reset_arg_byref_close()   # r38: no 18-f6 flag may cross a statement edge
+    # r305b-literalname: a statement spliced inside this one keeps its own set.
+    prev_str_at = _EXPR_STR_AT
+    _EXPR_STR_AT = set()
+    spelled_pos = None
     _GROUP_EOW_CLOSE = False   # r54: nor a window-closed 43 packet
     # r74-keyword: nor this statement's DISTINCT spelling, and a failed first
     # pass must not spend the section's next symbol-table entry on itself —
@@ -12000,9 +13748,26 @@ def dec_statement(buf, syms):
     _SYM_STMT_HI = -1
     _SYM_STMT_LO = None
     _SYM_SEEN.clear()
+    _distinct_words_before = None
+    if _SQL_DISTINCT_PREPASS is not None:
+        # r303-distslot: where this statement's resolved indexes begin, and
+        # whether its own projection carries the word. A statement spliced
+        # inside another (a subquery, INSERT ... SELECT) records no table entry.
+        _distinct_words_before = len(_SQL_DISTINCT_PREPASS["words"])
+        if not _SQL_SPLICED_BODY:
+            _SQL_DISTINCT_PREPASS["start"] = len(_SQL_DISTINCT_PREPASS["tap"].idx)
+            _SQL_DISTINCT_PREPASS["top"] = (
+                buf[:1] == bytes([0x6F])
+                and not _sql_bare_star_unspelled(buf, syms))
+            # The names it spells as strings (FROM, INTO) are numbered by it
+            # after its word, so they bound the word's slot from above.
+            # r305b-literalname: recorded once the decode has told the
+            # literals from the names.
+            spelled_pos = len(_SQL_DISTINCT_PREPASS["tap"].idx)
+            _SQL_DISTINCT_PREPASS["spelled"] = frozenset(_SYM_SPELLED or ())
     try:
         try:
-            return _dec_statement_checked(buf, syms)
+            return _link_packets_or(buf, syms, _dec_statement_checked(buf, syms))
         except Unsupported:
             pass
         _EXPR_RETRY_ACTIVE = True
@@ -12010,9 +13775,14 @@ def dec_statement(buf, syms):
         _SQL_DISTINCT_WORD = None
         _SQL_DISTINCT_N = _distinct_n_before
         _SQL_DISTINCT_NAMES = _distinct_names_before
+        if _distinct_words_before is not None:
+            # r303-distslot: the first walk forgets the failed pass the same way.
+            del _SQL_DISTINCT_PREPASS["words"][_distinct_words_before:]
         # r271-orderfirst: pass 1 already resolved names into _SYM_SEEN.
         # The retry must see only what pass 2 resolves.
         _SYM_SEEN.clear()
+        # r305b-literalname: and only the literals pass 2 decodes.
+        _EXPR_STR_AT.clear()
         # r38 follow-up: pass 1 can die AFTER its reader armed _ARG_BYREF_CLOSE
         # ('18 f6' consumed where no group loop follows to read-and-clear it),
         # so the retry pass must start marker-clean exactly like the statement
@@ -12023,14 +13793,33 @@ def dec_statement(buf, syms):
         # line is output-neutral by construction and by measured replay.
         _reset_arg_byref_close()
         try:
-            return _dec_statement_checked(buf, syms)
+            return _link_packets_or(buf, syms, _dec_statement_checked(buf, syms))
+        except Unsupported:
+            # r312-linkpacket: a call chain both passes refused, read by its
+            # link packets; r312-withput: a WITH-scoped chain target read as
+            # its object twin; any other refusal stands
+            ast = _dec_link_packets(buf, syms)
+            if ast is None:
+                ast = _dec_with_chain_put(buf, syms)
+            if ast is None:
+                raise
+            return ast
         finally:
             _EXPR_RETRY_ACTIVE = False
     finally:
         if _SYM_TABLE_HI is not None and _SYM_STMT_HI > _SYM_TABLE_HI:
             _SYM_TABLE_HI = _SYM_STMT_HI
+        literals = _EXPR_STR_AT
+        _EXPR_STR_AT = prev_str_at
         if _SYM_SPELLED is not None:
-            _SYM_SPELLED.update(_spelled_names(buf))
+            named = _spelled_names(buf, literals)
+            _SYM_SPELLED.update(named)
+            _SYM_SPELLED.update(("literal", n) for n in _spelled_names(buf) - named)
+        if spelled_pos is not None and _SQL_DISTINCT_PREPASS is not None:
+            first = _SQL_DISTINCT_PREPASS["first"]
+            _SQL_DISTINCT_PREPASS["spelled_at"].extend(
+                (spelled_pos, first[n]) for n in _spelled_names(buf, literals)
+                if n in first)
 
 
 _TEXT_FLAG_MARKS = (S.TEXT_FLAG_TEXTMERGE, S.TEXT_FLAG_NOSHOW, S.TEXT_FLAG_ADDITIVE,
@@ -12226,7 +14015,8 @@ def _dec_statement(buf, syms):
                     # f6 second-link spelling (no terminal property), a second
                     # stacked link, a hop run between the links and a missing
                     # property all keep the refusal below — no scored-split
-                    # carrier spends any of them.
+                    # carrier spends any of them. r312-withput reads them
+                    # after both passes refuse.
                     m2 = _sym(syms, S.u16(buf, t3 + 1))
                     aes2, ak2 = _dec_expr(buf, t3 + 4, end, syms,
                                           stop_bytes=_IF_COND_STOP)
@@ -14184,7 +15974,8 @@ def _dec_statement(buf, syms):
                         scope_count=c["scope_count"], cond=c["cond"],
                         while_cond=c["while_cond"], additive=c["additive"],
                         cond_before_fields=_copy_cond_before_fields(
-                            c["fields"], c["cond"], c["while_cond"], syms, busy))
+                            c["fields"], c["cond"], c["while_cond"], syms, busy)
+                        or _copy_cond_before_skeleton(c, syms))
     if lead == S.RELEASE_LEAD:
         if end >= 2 and buf[1] == S.RELEASE_ALL_MARK:
             # RELEASE ALL [EXTENDED | LIKE <skel> | EXCEPT <skel>] — the whole
@@ -14828,6 +16619,7 @@ def _dec_statement(buf, syms):
                 raise Unsupported("SCAN %s count unresolved" % scope_word)
             scope_expr = ses[0]
             j = sk + 1
+        scan_taps = {}
         for _clause in (0x13, 0x2B):
             if j >= end or buf[j] != _clause:
                 continue
@@ -14835,7 +16627,10 @@ def _dec_statement(buf, syms):
             clause_while = clause_while or is_while
             j += 1
             if j < end and buf[j] == S.FC:
-                ces, ck = _dec_expr(buf, j + 1, end, syms, stop_bytes=_IF_COND_STOP)
+                with _sym_tap() as _ctap:
+                    ces, ck = _dec_expr(buf, j + 1, end, syms,
+                                        stop_bytes=_IF_COND_STOP)
+                scan_taps[is_while] = _ctap
                 if len(ces) != 1 or ck >= end or buf[ck] != S.FD:
                     raise Unsupported("SCAN WHILE clause unresolved" if is_while
                                       else "SCAN FOR clause unresolved")
@@ -14870,9 +16665,16 @@ def _dec_statement(buf, syms):
             # ScanStmt whose rel_target None would skip walk verification.
             # Legacy bare/FOR frames keep lifting without any word.
             raise Unsupported("SCAN WHILE frame without ENDSCAN-distance word")
+        # r305-scanwhile: `SCAN WHILE w FOR c` stores the frame `SCAN FOR c
+        # WHILE w` stores; the table numbers each clause where it was written
+        # (oracle round 305 n01-n03). Only with no scope word and no NOOPTIMIZE.
+        while_first = (True in scan_taps and False in scan_taps
+                       and not scan_all and not scope_word and not nooptimize
+                       and _written_first(scan_taps[True], scan_taps[False]))
         return ScanStmt(scan_cond, scan_all, while_cond=scan_while,
                         rel_target=rel_target, scope_word=scope_word,
-                        scope_expr=scope_expr, nooptimize=nooptimize)
+                        scope_expr=scope_expr, nooptimize=nooptimize,
+                        while_first=while_first)
     if lead == S.TRY_LEAD:
         # ba f9 05 <u16> | ba e9 00 <u32>: same next-clause-mark anchor, two
         # widths (the walker picks which mark: CATCH, else FINALLY, else ENDTRY)
@@ -15548,21 +17350,26 @@ def _dec_statement(buf, syms):
             t = 2
             if t < end and buf[t] in (S.STR, S.STR2):
                 prog, t = _dec_str_arg(buf, t, end)
+                form = prog
             elif t < end and buf[t] == S.FC:
                 try:
-                    node, t = _fc_group(buf, t, end, syms)
+                    with _sym_tap() as tap:
+                        node, t = _fc_group(buf, t, end, syms)
                 except Unsupported:
                     raise Unsupported("DO FORM program expression unresolved")
                 prog = _emit(node)
+                form = tap.idx
             else:
                 raise Unsupported("DO FORM name missing")
-            args, to_target, name_target, flags, t = _dec_do_form_clauses(
+            args, to_target, name_target, flags, taps, t = _dec_do_form_clauses(
                 buf, t, end, syms)
             if t != end:
                 raise Unsupported("DO FORM trailing bytes")
+            with_first = _do_with_first(to_target, args, syms)
             return DoStmt(prog, args, form=True, to_target=to_target,
                           name_target=name_target, flags=flags,
-                          with_first=_do_with_first(to_target, args, syms))
+                          with_first=with_first,
+                          name_slot=_do_form_name_slot(form, taps, with_first, syms))
         prog = None
         t = 1
         if buf[1] in (S.STR, S.STR2):
@@ -16053,6 +17860,14 @@ def _dec_statement(buf, syms):
             text += (udest["into"] or "") + (udest["to"] or "")
             return SqlSelectColumns(text, readwrite=readwrite,
                                     nofilter=nofilter, display=udisplay)
+        # r308-selectall: SELECT ALL is 6f 03 15 …, and the table interns ALL
+        # at the SELECT keyword, ahead of every name the statement introduces
+        # (oracle round 308 a21, a30-a39, a48). ALL leaves an aggregate's
+        # DISTINCT word unrecorded and interns no COUNT (a21, a32, a34).
+        select_all = False
+        if buf[j] == S.SQL_SELECT_ALL_MARK:
+            select_all = True
+            j += 1
         distinct = False
         if buf[j] == S.SQL_DISTINCT_MARK:
             # r42-seldistinct: SELECT DISTINCT is 6f be 15 … [bc bd INTO].
@@ -16313,6 +18128,10 @@ def _dec_statement(buf, syms):
         # r42-selgroup: GROUP BY is bf fc <n> fd [07 fc <n> fd]* after WHERE
         # and before ORDER BY. The INTO scanner used to skip bf and drop it.
         group_terms = []
+        # r303-groupwhere: the names GROUP BY introduces, for the WHERE order.
+        global _SQL_GROUP_NEW
+        _group_mark = len(_SYM_SEEN)
+        _group_already = set(_SYM_SEEN)
         if pos < end and buf[pos] == S.SQLSEL_GROUP_MARK:
             pos += 1
             if pos >= end or buf[pos] != S.FC:
@@ -16335,6 +18154,8 @@ def _dec_statement(buf, syms):
                     break
                 pos = mk + 1
                 group_terms.append(mes[0])
+        _SQL_GROUP_NEW = _introduced(_SYM_SEEN[_group_mark:], _group_already,
+                                     _SYM_TABLE_HI)
         # r47-having: HAVING is `c0 fc <cond> fd`, between GROUP BY and ORDER
         # BY. With no c0 arm the INTO scanner skipped the group AND every
         # clause behind it, so the statement lifted without its HAVING and
@@ -16413,6 +18234,7 @@ def _dec_statement(buf, syms):
         # r42-seltop: SELECT TOP n is 29 fc <n> [fd] immediately before INTO.
         # The INTO scanner used to skip this clause and drop TOP.
         top_n = None
+        top_percent = False
         if pos < end and buf[pos] == S.SQLSEL_TOP_MARK:
             pos += 1
             if pos >= end or buf[pos] != S.FC:
@@ -16425,6 +18247,12 @@ def _dec_statement(buf, syms):
             if pos < end and buf[pos] == S.FD:
                 pos += 1
             top_n = tes[0]
+            # r298-toppercent: PERCENT is one byte, c8, behind the TOP group
+            # (oracle round298_sqltrail.json t09: `TOP 10 PERCENT` is
+            # `29 fc f8 02 0a fd c8`); the INTO scan used to step over it.
+            if pos < end and buf[pos] == S.SQLSEL_TOP_PERCENT_MARK:
+                top_percent = True
+                pos += 1
         # INTO CURSOR / INTO TABLE marker + name; scan forward past unknown
         # clauses if needed. round-26: INTO TABLE = bc 31 beside bc bd; the
         # name operand may be an fb/d9 string OR a grouped expression
@@ -16493,7 +18321,8 @@ def _dec_statement(buf, syms):
                 cols_after=cols_after, star_mid=star_mid,
                 star_mid_txt=star_mid_txt,
                 order_before_where=order_before_where,
-                into_array_new=into_array_new, order_new=_order_new)
+                into_array_new=into_array_new, order_new=_order_new,
+                top_percent=top_percent, select_all=select_all)
         for scan in range(pos, end - 1):
             pair = buf[scan:scan + 2]
             if scan == pos and pair == bytes(S.SQL_INTOARRAY_MARK) \
@@ -16504,6 +18333,18 @@ def _dec_statement(buf, syms):
                 break
             if pair == bytes(S.SQLSEL_INTOCURSOR_MARK) \
                     or pair == bytes(S.SQL_INTOTABLE_MARK):
+                if scan > pos:
+                    # r302-guard: the clause walk stopped at `pos` and did not
+                    # consume buf[pos:scan]; those bytes carry a clause the
+                    # decoder could not read (a WHERE/ORDER whose form is not
+                    # measured — frxbuilder2.vcx 110, census round302_census).
+                    # Emitting the INTO found past them would lift a SELECT that
+                    # silently reads every row. FoxLift refuses a statement it
+                    # cannot read whole, visibly, rather than emit different
+                    # code. A tail that abuts (`scan == pos`) is unaffected.
+                    raise Unsupported(
+                        "SQL SELECT drops %d unconsumed bytes before INTO"
+                        % (scan - pos))
                 into_word = "CURSOR" if pair == bytes(S.SQLSEL_INTOCURSOR_MARK) \
                     else "TABLE"
                 k = scan + 2
@@ -16556,7 +18397,8 @@ def _dec_statement(buf, syms):
             order_terms, into_txt, to_txt, readwrite, nofilter, display,
             syms, cur_literal, _where_new, cols_after=cols_after,
             star_mid=star_mid, star_mid_txt=star_mid_txt,
-            order_before_where=order_before_where, order_new=_order_new)
+            order_before_where=order_before_where, order_new=_order_new,
+            top_percent=top_percent, select_all=select_all)
         j += 1
         where = None
         if buf[j] == 0xC6:
@@ -17128,7 +18970,15 @@ def _dec_statement(buf, syms):
             # r113-set: SET FIELDS TO <sym> [, <sym>]* — the field list rides
             # bare symbols behind the TO, joined on 07. A non-symbol first
             # value keeps the shipped single-value path below.
-            if name == "FIELDS" and end >= 6 and buf[3] == S.SYM:
+            # r304-symlist: SKIP, CARRY, NOCPTRANS and EVENTLIST spend the
+            # same bare-symbol list (oracle round304_cells a02/a03/a05,
+            # o02/o05/o07: 47 <id> 28 f7 (07 f7)*). Their single name keeps
+            # the shipped value path, so only a joiner behind the first
+            # symbol engages the list here.
+            listed = name == "FIELDS" or (
+                buf[1] in S.SET_SYMBOL_VALUE_IDS and end > 6
+                and buf[6] == S.ARGJOIN)
+            if listed and end >= 6 and buf[3] == S.SYM:
                 fields = [_sym(syms, S.u16(buf, 4))]
                 k = 6
                 while k < end and buf[k] == S.ARGJOIN:
@@ -17138,7 +18988,7 @@ def _dec_statement(buf, syms):
                     k += 4
                 if k != end:
                     raise Unsupported("SET trailing bytes")
-                return SetStmt("SET FIELDS TO %s" % ", ".join(fields))
+                return SetStmt("SET %s TO %s" % (name, ", ".join(fields)))
             es, k, ungrouped = dec_set_value(buf, 3, end, syms, sid=buf[1])
             # r220-setproc: SET PROCEDURE / SET INDEX TO <fb> (, <fb>)* —
             # the bare-name list the carriers spend (47 2b 28 / 47 21 28
@@ -17323,18 +19173,28 @@ def _dec_statement(buf, syms):
                 if depth or fd_pos >= end:
                     raise Unsupported("REPLACE IN clause unresolved")
                 expr_end = fd_pos
-                if expr_end > t + 1 and buf[expr_end - 1] == 0x03:
+                paren = expr_end > t + 1 and buf[expr_end - 1] == 0x03
+                if paren:
                     expr_end -= 1     # contextual-reuse 03 separator before fd
                 es2, k2 = _dec_expr(buf, t + 1, expr_end, syms)
                 if len(es2) != 1 or k2 != expr_end:
                     raise Unsupported("REPLACE IN expression unresolved")
                 t = fd_pos + 1
-                in_spec = ("(", es2[0], ")")
+                # r298-replaceinstr: the 03 is the parenthesis the source wrote.
+                # `IN 'tbx'` and `IN "tbx"` store `fc fb|d9 <s> fd` with no 03,
+                # `IN ('tbx')` adds it (oracle round298_cells.json r01, r02, r04).
+                # A string with no 03 is written bare; anything else keeps the
+                # parentheses.
+                if not paren and isinstance(es2[0], Str):
+                    in_spec = ("", es2[0], "")
+                else:
+                    in_spec = ("(", es2[0], ")")
             else:
                 raise Unsupported("REPLACE IN clause unresolved")
             j = t
         else:
             j = 1
+        pairs_mark = len(_SYM_SEEN)   # r308-forahead: the field list starts here
         while True:
             lv, j = _dec_quoted_target(buf, j, end)
             if lv is None and j + 5 <= end and buf[j] == S.WORKAREA_REF \
@@ -17458,6 +19318,9 @@ def _dec_statement(buf, syms):
             if buf[k] == 0x13 and k + 1 < end and buf[k + 1] == S.FC:
                 # trailing FOR clause: 13 fc <cond> [fd] (mainmenu Command5 aligned)
                 field_lo = _SYM_STMT_LO       # r282: the fields' low-water, before the condition
+                fields_lo = min((i for i in _SYM_SEEN[pairs_mark:]
+                                 if _SYM_TABLE_HI is not None and i > _SYM_TABLE_HI),
+                                default=None)
                 with _sym_tap() as cond_tap:
                     fes, fk = _dec_expr(buf, k + 2, end, syms, stop_bytes=_IF_COND_STOP)
                 cond_lo = cond_tap.first_new()
@@ -17508,6 +19371,7 @@ def _dec_statement(buf, syms):
                     while_cond=while_cond, scope_word=scope_word,
                     scope_count=scope_count, additive=additive,
                     nooptimize=nooptimize, all_first=all_first,
+                    fields_lo=fields_lo,
                     for_before_all=_replace_for_before_all(
                         syms, scope, fes[0], nooptimize=nooptimize,
                         additive=additive, scope_word=scope_word,
@@ -17518,7 +19382,11 @@ def _dec_statement(buf, syms):
                         additive=additive, scope_word=scope_word,
                         while_cond=while_cond),
                     noopt_first=_replace_noopt_first(
-                        syms, nooptimize, scope, all_first))
+                        syms, nooptimize, scope, all_first),
+                    noopt_after_for=_replace_noopt_after_for(
+                        syms, nooptimize=nooptimize, all_scope=scope,
+                        all_first=all_first, scope_word=scope_word,
+                        while_cond=while_cond, additive=additive))
             if buf[k] == 0x2B and k + 1 < end and buf[k + 1] == S.FC:
                 # r107-replace: bare trailing WHILE clause
                 # ('REPLACE f WITH 1 WHILE c', measured).
@@ -17734,8 +19602,25 @@ def _dec_statement(buf, syms):
         # that says otherwise is one no source produces, and the reader declines
         # rather than reading an order into it.
         expr_lo = expr_tap.first_new()
-        cf = clause_tap.first_new()
-        tf = to_tap.first_new()
+        # r303-sumorder: the summed expression is written ahead of either clause,
+        # so a name it introduces is numbered below both — including the work-area
+        # alias of `SUM a.f TO d FOR a.g`, which the FOR condition then reuses. The
+        # clause's own first new name is the one after that shared alias, so the
+        # order comparison skips the names the expression already introduced; read
+        # raw, the shared alias is the clause's first new and the TO/FOR order is
+        # lost (the fallback below then spells TO first and the stored FOR-first
+        # table misses). Cells u01-u04: the oracle keeps the shared alias first and
+        # swaps the TO target and the FOR field by one slot between the two orders.
+        expr_new = {i for i in expr_tap.idx
+                    if _SYM_TABLE_HI is not None and i > _SYM_TABLE_HI}
+
+        def _first_distinct(tap):
+            c = [i for i in tap.idx if _SYM_TABLE_HI is not None
+                 and i > _SYM_TABLE_HI and i not in expr_new]
+            return min(c) if c else None
+
+        cf = _first_distinct(clause_tap)
+        tf = _first_distinct(to_tap)
         consistent = expr_lo is None or all(
             expr_lo < i for i in (cf, tf) if i is not None)
         if has_clause and consistent and cf is not None and tf is not None:
@@ -18222,10 +20107,15 @@ def _dec_statement(buf, syms):
             raise Unsupported("DELETE trailing bytes")
         # The two shapes rounds 28 and 31 measured keep the nodes they were
         # measured into, so nothing downstream of them moves.
+        bracket = None
+        if cond is not None and scope is None and count is None \
+                and while_cond is None and not nooptimize:
+            bracket = _delete_bracket_word(syms, cond)
         if alias is None and not nooptimize and while_cond is None \
                 and count is None and scope in (None, "ALL"):
             if cond is not None:
-                return DeleteFor(cond, all_scope=scope == "ALL")
+                return DeleteFor(cond, all_scope=scope == "ALL",
+                                 bracket_word=bracket)
             if scope == "ALL":
                 return ("DELETE ALL",)
         if scope is None and count is None and cond is None \
@@ -18235,9 +20125,14 @@ def _dec_statement(buf, syms):
         if (scope == "ALL" and cond is not None and alias is not None
                 and while_cond is None and not nooptimize and count is None):
             in_before_all = _delete_in_before_all(alias, syms)
+        while_bracket = None
+        if cond is None and while_cond is not None and scope is None \
+                and count is None and alias is None and not nooptimize:
+            while_bracket = _delete_while_bracket(syms, while_cond)
         return DeleteScopeStmt(scope or "", count, cond=cond, alias=alias,
                                while_cond=while_cond, nooptimize=nooptimize,
-                               in_before_all=in_before_all)
+                               in_before_all=in_before_all,
+                               bracket_word=bracket, while_bracket=while_bracket)
     if lead == S.ERASE_LEAD:
         # ERASE — two measured operand spellings, then an optional clause tail.
         #
@@ -20226,11 +22121,12 @@ def lift_section(sec, syms_override=None, keep_marks=False):
     # reason dec_statement uses it: the reader sits deep under the walk and
     # statement decoding is single-threaded and never nested.
     global _MENU_SHIFTED_BLOCK, _PAYLOAD_CODEC, _SYM_TABLE_HI, _SYM_SPELLED
-    global _SQL_DISTINCT_N, _SQL_DISTINCT_NAMES, _SQL_COUNT_ABBR
+    global _SQL_DISTINCT_N, _SQL_DISTINCT_NAMES, _SQL_COUNT_ABBR, _SYM_CLAIMED
     outer = _MENU_SHIFTED_BLOCK
     prev_codec = _PAYLOAD_CODEC
     prev_hi = _SYM_TABLE_HI
     prev_spelled = _SYM_SPELLED
+    prev_claimed = _SYM_CLAIMED
     prev_distinct = _SQL_DISTINCT_N
     prev_names = _SQL_DISTINCT_NAMES
     prev_count = _SQL_COUNT_ABBR
@@ -20241,6 +22137,7 @@ def lift_section(sec, syms_override=None, keep_marks=False):
     # high-water is None and every canonicalised clause order stays canonical.
     _SYM_TABLE_HI = -1
     _SYM_SPELLED = set()
+    _SYM_CLAIMED = set()
     # r74-keyword: the section's DISTINCT entries are consumed in source order,
     # which is knowable here and nowhere else.
     _SQL_DISTINCT_N = 0
@@ -20249,18 +22146,61 @@ def lift_section(sec, syms_override=None, keep_marks=False):
     _SQL_DISTINCT_NAMES = _sql_distinct_names(sec.statements, eff)
     _SQL_COUNT_ABBR = _sql_count_abbr_from(
         [st.stream for st in sec.statements], eff)
+    global _SQL_DISTINCT_PLAN, _SQL_DISTINCT_PREPASS
+    prev_plan = _SQL_DISTINCT_PLAN
+    _SQL_DISTINCT_PLAN = None
     try:
+        if (any(isinstance(x, str) and x.upper() in _SQL_DISTINCT_SPELLINGS
+                for x in eff)
+                and any(S.SQL_DISTINCT_MARK in (st.stream or b"")
+                        or _sql_agg_first_distinct(st.stream or b"")
+                        for st in sec.statements)):
+            # r303-distslot: which entry a DISTINCT statement owns depends on
+            # the first name a LATER statement introduces, so a first walk
+            # records every resolved index and the plan is read from it.
+            _SQL_DISTINCT_PLAN = _sql_distinct_prepass(sec, eff, code_base)
+            _SYM_TABLE_HI = -1
+            _SYM_SPELLED = set()
+            _SYM_CLAIMED = set()
+            _SQL_DISTINCT_N = 0
+            _SQL_DISTINCT_NAMES = _sql_distinct_names(sec.statements, eff)
         out, _ = _walk_block(sec.statements, 0, len(sec.statements), eff,
                              code_base=code_base)
     finally:
+        _SQL_DISTINCT_PLAN = prev_plan
         _MENU_SHIFTED_BLOCK = outer
         _PAYLOAD_CODEC = prev_codec
         _SYM_TABLE_HI = prev_hi
         _SYM_SPELLED = prev_spelled
+        _SYM_CLAIMED = prev_claimed
         _SQL_DISTINCT_N = prev_distinct
         _SQL_DISTINCT_NAMES = prev_names
         _SQL_COUNT_ABBR = prev_count
     return out if keep_marks else _strip_verbatim_marks(out)
+
+
+def _sql_distinct_prepass(sec, eff, code_base):
+    """r303-distslot: walk the section once and read the DISTINCT plan off it."""
+    global _SQL_DISTINCT_PREPASS
+    tap = _sym_tap()
+    first = {}
+    for i, x in enumerate(eff):
+        if isinstance(x, str):
+            first.setdefault(x.casefold(), i)
+    _SQL_DISTINCT_PREPASS = {"tap": tap, "start": 0, "top": False,
+                             "spelled": frozenset(), "words": [],
+                             "first": first, "spelled_at": []}
+    try:
+        with tap:
+            _walk_block(sec.statements, 0, len(sec.statements), eff,
+                        code_base=code_base)
+        words = _SQL_DISTINCT_PREPASS["words"]
+        spelled_at = _SQL_DISTINCT_PREPASS["spelled_at"]
+    except Unsupported:
+        return None
+    finally:
+        _SQL_DISTINCT_PREPASS = None
+    return _sql_distinct_plan(tap.idx, words, eff, spelled_at)
 
 
 def _class_header_line(ident):
@@ -20333,15 +22273,131 @@ _ON_HANDLER_RE = _re.compile(
 # hits longer than the stored folds and the module unplaced.
 _MERGE_LINE_RE = _re.compile(r"^\s*\\")
 
+# r297-strings: a LINENO() spelled inside a string literal, an EVALUATE
+# argument or macro source (both strings on the wire), a comment, or a TEXT
+# body is not folded (round297_lineno_streams.json, cells str_*, evaluate,
+# macro, text_*). Those spellings must not be counted or the count runs long
+# and the module goes out unplaced.
+_TEXT_OPEN_RE = _re.compile(r"^\s*TEXT(\s|$)", _re.I)
+_TEXT_EQ_RE = _re.compile(r"^\s*TEXT\s*=", _re.I)
+_ENDTEXT_RE = _re.compile(r"^\s*ENDTEXT\b", _re.I)
+_COMMENT_LINE_RE = _re.compile(r"^\s*(?:\*|NOTE\b)", _re.I)
+_LINENO_SCAN_RE = _re.compile(r"LINENO|^\s*(?:END)?TEXT", _re.I)
+
+
+def _string_spans(line):
+    """(start, end) of each string literal and trailing `&&` comment.
+
+    A `[` opens a string only where an operand starts; after a name, `)` or
+    `]` it is a subscript, so ``qa[LINENO()]`` still counts (round297).
+    """
+    out = []
+    i, n, prev = 0, len(line), ""
+    while i < n:
+        c = line[i]
+        if c in "\"'":
+            j = line.find(c, i + 1)
+            j = n - 1 if j < 0 else j
+            out.append((i, j + 1))
+            i, prev = j + 1, "s"
+            continue
+        if c == "[" and not (prev and (prev.isalnum() or prev in "_)]")):
+            j = line.find("]", i + 1)
+            j = n - 1 if j < 0 else j
+            out.append((i, j + 1))
+            i, prev = j + 1, "s"
+            continue
+        if line.startswith("&&", i):
+            out.append((i, n))
+            break
+        if not c.isspace():
+            prev = c
+        i += 1
+    return out
+
+
+def _lineno_code_matches(line):
+    """Spans of each code LINENO() / LINENO(1) on the line, strings skipped."""
+    spans = _string_spans(line)
+    out = []
+    for m in _LN_HIT_RE.finditer(line):
+        if any(a <= m.start() < b for a, b in spans):
+            continue
+        out.append((m.start(), m.end()))
+    return out
+
+
+def _lineno_scan(lines):
+    """Per line, the code LINENO spans and the string-literal LINENO count.
+
+    Yields (index, code_spans, string_hits) for every line, with the TEXT
+    body, ON-handler and `\\` merge lines contributing no code span.
+    """
+    in_text = False
+    for i, ln in enumerate(lines):
+        # A line with no LINENO() and no TEXT / ENDTEXT opener counts nothing
+        # and leaves the TEXT state as it is; skip the span scan for it.
+        if not _LINENO_SCAN_RE.search(ln):
+            yield i, [], 0
+            continue
+        opens = bool(_TEXT_OPEN_RE.match(ln)) and not _TEXT_EQ_RE.match(ln)
+        body = in_text and not opens
+        if opens:
+            in_text = True
+        if _ENDTEXT_RE.match(ln):
+            in_text = False
+        if body or _COMMENT_LINE_RE.match(ln):
+            yield i, [], 0
+            continue
+        if _ON_HANDLER_RE.match(ln) or _MERGE_LINE_RE.match(ln):
+            yield i, [], 0
+            continue
+        spans = _string_spans(ln)
+        shits = sum(1 for m in _LN_HIT_RE.finditer(ln)
+                    if any(a <= m.start() < b for a, b in spans))
+        yield i, _lineno_code_matches(ln), shits
+
 
 def _lineno_hits(lines):
     hits = []
-    for i, ln in enumerate(lines):
-        if _ON_HANDLER_RE.match(ln) or _MERGE_LINE_RE.match(ln):
-            continue
-        for _ in _LN_HIT_RE.finditer(ln):
-            hits.append(i)
+    for i, code, _ in _lineno_scan(lines):
+        hits.extend(i for _ in code)
     return hits
+
+
+def _lineno_string_hits(lines):
+    """Count of LINENO() spelled inside a string literal in the lifted text."""
+    return sum(s for _, _, s in _lineno_scan(lines))
+
+
+def _lineno_string_tokens(mod):
+    """Count of LINENO() spelled inside a STR / STR2 token of the module."""
+    total = 0
+    for sec in mod.sections:
+        if sec.is_empty:
+            continue
+        for st in sec.statements:
+            buf = st.stream or b""
+            i, n = 0, len(buf)
+            while i + 3 <= n:
+                if buf[i] in (S.STR, S.STR2):
+                    ln = S.u16(buf, i + 1)
+                    if i + 3 + ln <= n:
+                        text = buf[i + 3:i + 3 + ln].decode("latin1")
+                        total += sum(1 for _ in _LN_HIT_RE.finditer(text))
+                    i += 3 + ln
+                    continue
+                i += 1
+    return total
+
+
+def _rewrite_lineno_body(line, occ):
+    """Rewrite the ``occ``-th code LINENO() on the line to LINENO(1)."""
+    spans = _lineno_code_matches(line)
+    if occ >= len(spans):
+        return line
+    a, b = spans[occ]
+    return line[:a] + "LINENO(1)" + line[b:]
 
 
 def _proc_line(lines, idx):
@@ -20366,10 +22422,12 @@ def _place_lineno_policy(lines, stored, before_proc):
     """
     lines = list(lines)
     file_headers = set()
+    # Blanks and the LINENO(1) rewrite never add or drop a hit, so the hit
+    # list is counted once and shifted with each pad.
+    hits = _lineno_hits(lines)
+    if len(hits) != len(stored):
+        return lines
     for i, S in enumerate(stored):
-        hits = _lineno_hits(lines)
-        if len(hits) != len(stored) or i >= len(hits):
-            break
         P = hits[i] + 1
         proc = _proc_line(lines, hits[i])
         body = None if proc is None else P - proc
@@ -20384,14 +22442,15 @@ def _place_lineno_policy(lines, stored, before_proc):
                 "lineno_reconstruction_ahead: stored %d at reconstructed "
                 "line %d" % (S, P))
         if form == "(1)":
-            lines[hits[i]] = _LN_BARE_RE.sub("LINENO(1)", lines[hits[i]],
-                                             count=1)
+            occ = sum(1 for j in range(i) if hits[j] == hits[i])
+            lines[hits[i]] = _rewrite_lineno_body(lines[hits[i]], occ)
         header = None if proc is None else proc - 1
         at_header = (before_proc and form == "()" and header is not None
                      and header not in file_headers)
         at = header if at_header else hits[i]
         if pad:
             lines[at:at] = [""] * pad
+            hits = [h + pad if h >= at else h for h in hits]
             file_headers = {h + pad if h >= at else h for h in file_headers}
             if header is not None and header >= at:
                 header += pad
@@ -20415,12 +22474,12 @@ def _place_lineno_recover(lines, stored):
     retries = {}
     i = 0
     nstored = len(stored)
+    hits = _lineno_hits(lines)
+    if len(hits) != nstored:
+        raise Unsupported(
+            "lineno_reconstruction_ahead: stored %d at reconstructed "
+            "line %d" % (stored[0] if nstored else 0, 0))
     while i < nstored:
-        hits = _lineno_hits(lines)
-        if len(hits) != nstored or i >= len(hits):
-            raise Unsupported(
-                "lineno_reconstruction_ahead: stored %d at reconstructed "
-                "line %d" % (stored[min(i, nstored - 1)], 0))
         S = stored[i]
         P = hits[i] + 1
         proc = _proc_line(lines, hits[i])
@@ -20440,19 +22499,24 @@ def _place_lineno_recover(lines, stored):
                           if lines[j] == ""]
             if (k is not None and k > 0 and len(blanks) >= k
                     and retries.get(i, 0) < 1):
-                for j in reversed(blanks[:k]):
+                gone = blanks[:k]
+                for j in reversed(gone):
                     del lines[j]
+                hits = [h - _bisect.bisect_left(gone, h) for h in hits]
                 lines[pj:pj] = [""] * k
+                hits = [h + k if h >= pj else h for h in hits]
                 retries[i] = 1
                 continue
             raise Unsupported(
                 "lineno_reconstruction_ahead: stored %d at reconstructed "
                 "line %d" % (S, P))
         if form == "(1)":
-            lines[hits[i]] = _LN_BARE_RE.sub(
-                "LINENO(1)", lines[hits[i]], count=1)
+            occ = sum(1 for j in range(i) if hits[j] == hits[i])
+            lines[hits[i]] = _rewrite_lineno_body(lines[hits[i]], occ)
         if pad:
-            lines[hits[i]:hits[i]] = [""] * pad
+            at = hits[i]
+            lines[at:at] = [""] * pad
+            hits = [h + pad if h >= at else h for h in hits]
         i += 1
     hits = _lineno_hits(lines)
     if len(hits) != nstored:
@@ -20470,6 +22534,224 @@ def _place_lineno_recover(lines, stored):
     return lines
 
 
+def _place_lineno_solve(lines, stored):
+    """Place mixed file-form and body-form folds under one header line each.
+
+    A fold stores its absolute file line when it was a bare ``LINENO()`` and
+    its procedure-body line (file line minus the PROCEDURE line) when it was
+    ``LINENO(1)`` (r67-lineno, round297 oracle cells). Each procedure has one
+    header line H: on a single source line a file-form value and a body-form
+    value differ by exactly H. A fold that would run below the file high-water
+    cannot be an absolute line, so it is body-form.
+
+    H is solved per procedure from the file-form reach, the file/body
+    adjacencies and any same-line pin, then every PROCEDURE line and every
+    fold statement is placed at an absolute target. A target that cannot be
+    reached forward is a named refusal.
+    """
+    hits = _lineno_hits(lines)
+    n = len(stored)
+    if len(hits) != n:
+        raise Unsupported(
+            "lineno_reconstruction_ahead: stored %d at reconstructed line %d"
+            % (stored[0] if stored else 0, 0))
+    # On one physical line a file-form fold stores the file line and a
+    # body-form fold the smaller body line, so with two values on a line the
+    # larger is the file form. Folds sharing a line and value share a form.
+    # A new file line must exceed the running file high-water; a value at or
+    # below it cannot be a later absolute line, so it is body-form.
+    line_vals = {}
+    line_order = []
+    for i in range(n):
+        if hits[i] not in line_vals:
+            line_order.append(hits[i])
+        line_vals.setdefault(hits[i], set()).add(stored[i])
+    form_of = {}  # (line, value) -> form
+    hw = 0
+    for line in line_order:
+        vals = line_vals[line]
+        if len(vals) > 1:
+            fv = max(vals)
+            for v in vals:
+                form_of[(line, v)] = "file" if v == fv else "body"
+            hw = max(hw, fv)
+        else:
+            v = next(iter(vals))
+            if v > hw:
+                form_of[(line, v)] = "file"
+                hw = v
+            else:
+                form_of[(line, v)] = "body"
+    forms = [form_of[(hits[i], stored[i])] for i in range(n)]
+    proc = [_proc_line(lines, hits[i]) for i in range(n)]  # 1-based or None
+    order, seen = [], set()
+    for p in proc:
+        if p is not None and p not in seen:
+            seen.add(p)
+            order.append(p)
+    grp = {}
+    for i in range(n):
+        grp.setdefault(proc[i], []).append(i)
+
+    bounds = {}
+    for p in order:
+        fs = grp[p]
+        hlo, hhi = [], []
+        for i in fs:
+            if forms[i] == "file":
+                hhi.append(stored[i] - (hits[i] + 1 - p))
+            elif stored[i] < (hits[i] + 1 - p):
+                raise Unsupported(
+                    "lineno_reconstruction_ahead: stored %d at reconstructed "
+                    "line %d" % (stored[i], hits[i] + 1))
+        for a in range(1, len(fs)):
+            i0, i1 = fs[a - 1], fs[a]
+            gap = hits[i1] - hits[i0]
+            f0, f1 = forms[i0], forms[i1]
+            if f0 == "file" and f1 == "body":
+                hlo.append(stored[i0] + gap - stored[i1])
+            elif f0 == "body" and f1 == "file":
+                hhi.append(stored[i1] - stored[i0] - gap)
+            elif stored[i1] - stored[i0] < gap:
+                raise Unsupported(
+                    "lineno_reconstruction_ahead: stored %d at reconstructed "
+                    "line %d" % (stored[i1], hits[i1] + 1))
+        pin = None
+        byline = {}
+        for i in fs:
+            byline.setdefault(hits[i], []).append(i)
+        for gr in byline.values():
+            fv = [stored[i] for i in gr if forms[i] == "file"]
+            bv = [stored[i] for i in gr if forms[i] == "body"]
+            if fv and bv:
+                pv = fv[0] - bv[0]
+                if pin is None:
+                    pin = pv
+                elif pin != pv:
+                    raise Unsupported(
+                        "lineno_reconstruction_ahead: stored %d at "
+                        "reconstructed line %d" % (stored[fs[0]], hits[fs[0]]
+                                                   + 1))
+        bounds[p] = (max(hlo) if hlo else None,
+                     min(hhi) if hhi else None, pin)
+
+    target = {}   # line index -> absolute target (deduped)
+    header = {}   # 1-based proc line -> chosen H
+    prev_idx, prev_t = -1, 0
+
+    def want(idx, t):
+        if idx in target:
+            if target[idx] != t:
+                return False
+            return True
+        target[idx] = t
+        return True
+
+    for i in range(n):
+        p = proc[i]
+        if p is not None and p not in header:
+            pi = max(target) if target else prev_idx
+            pt = target.get(pi, prev_t)
+            nat = pt + ((p - 1) - pi)
+            hlo, hhi, pin = bounds[p]
+            lo = nat if hlo is None else max(nat, hlo)
+            hi = hhi
+            if hi is not None and hi < lo:
+                raise Unsupported(
+                    "lineno_reconstruction_ahead: stored %d at reconstructed "
+                    "line %d" % (stored[grp[p][0]], hits[grp[p][0]] + 1))
+            H = pin if pin is not None else lo
+            if H < lo or (hi is not None and H > hi):
+                raise Unsupported(
+                    "lineno_reconstruction_ahead: stored %d at reconstructed "
+                    "line %d" % (stored[grp[p][0]], hits[grp[p][0]] + 1))
+            header[p] = H
+            if not want(p - 1, H):
+                raise Unsupported(
+                    "lineno_reconstruction_ahead: stored %d at reconstructed "
+                    "line %d" % (stored[grp[p][0]], hits[grp[p][0]] + 1))
+        if forms[i] == "file":
+            t = stored[i]
+        elif p is None:
+            raise Unsupported(
+                "lineno_reconstruction_ahead: stored %d at reconstructed "
+                "line %d" % (stored[i], hits[i] + 1))
+        else:
+            t = header[p] + stored[i]
+        if not want(hits[i], t):
+            raise Unsupported(
+                "lineno_reconstruction_ahead: stored %d at reconstructed "
+                "line %d" % (stored[i], hits[i] + 1))
+
+    anchors = sorted(target.items())
+    pt, pidx = 0, -1
+    for idx, t in anchors:
+        if t < pt + (idx - pidx):
+            raise Unsupported(
+                "lineno_reconstruction_ahead: stored %d at reconstructed "
+                "line %d" % (t, idx + 1))
+        pt, pidx = t, idx
+
+    out = []
+    prev_idx, prev_t = -1, 0
+    for idx, t in anchors:
+        out.extend(lines[prev_idx + 1:idx])
+        out.extend([""] * (t - (prev_t + (idx - prev_idx))))
+        out.append(lines[idx])
+        prev_idx, prev_t = idx, t
+    out.extend(lines[prev_idx + 1:])
+
+    # Emit LINENO(1) for every body-form fold, by code occurrence on its line.
+    final = _lineno_hits(out)
+    if len(final) != n:
+        raise Unsupported(
+            "lineno_reconstruction_ahead: stored %d at reconstructed line %d"
+            % (stored[0], 0))
+    for i in range(n - 1, -1, -1):
+        occ = sum(1 for j in range(i) if final[j] == final[i])
+        P = final[i] + 1
+        hp = _proc_line(out, final[i])
+        if forms[i] == "body":
+            out[final[i]] = _rewrite_lineno_body(out[final[i]], occ)
+            if hp is None or (P - hp) != stored[i]:
+                raise Unsupported(
+                    "lineno_reconstruction_ahead: stored %d at reconstructed "
+                    "line %d" % (stored[i], P))
+        elif P != stored[i]:
+            raise Unsupported(
+                "lineno_reconstruction_ahead: stored %d at reconstructed "
+                "line %d" % (stored[i], P))
+    return out
+
+
+def _lineno_lands(lines, stored):
+    """Every fold sits on its stored file line or its stored body line."""
+    hits = _lineno_hits(lines)
+    if len(hits) != len(stored):
+        return False
+    for i, s in enumerate(stored):
+        P = hits[i] + 1
+        proc = _proc_line(lines, hits[i])
+        body = None if proc is None else P - proc
+        if P != s and body != s:
+            return False
+    return True
+
+
+def _lineno_count_consistent(lines, mod):
+    """The `[` heuristic never drops a real call as a string (r297).
+
+    A `[LINENO()]` the scan read as a string must be backed by a LINENO()
+    spelled in a STR / STR2 token. When the scan drops more than the module
+    actually spells, it read a subscript as a string and would miss a real
+    fold, so no placement is attempted and the lift goes out as main wrote it
+    (the same silent stop as a count mismatch). Command-text tokens (ON
+    handler, `\\` merge) carry LINENO() that the scan already skips by line,
+    so the token count is only ever an upper bound here.
+    """
+    return _lineno_string_hits(lines) <= _lineno_string_tokens(mod)
+
+
 def _place_lineno(lines, mod):
     """Put each fold-bearing statement on its stored line (r67-lineno).
 
@@ -20485,22 +22767,49 @@ def _place_lineno(lines, mod):
 
     When that second placement is also ahead, surplus blanks already inside
     the procedure move to just before the PROCEDURE line (r277-lineno) and
-    the fold is placed again. If that still misses, the inner refusal is
-    the one raised.
+    the fold is placed again (r297 adds a header-line solver for folds that
+    mix both forms). A placement is kept only when every fold lands on its
+    stored file or body line. When the inner placement does not land, the
+    first of the other rules that lands is kept, unless another rule lands
+    in at least one line per fold fewer: the longer one pads far past its
+    stored lines (r297; shop_stocklst_edit 162,137 against 10,516).
     """
     stored = _lineno_stored(mod)
     if not stored:
         return lines
+    if not _lineno_count_consistent(lines, mod):
+        return lines
+    first = None
     try:
-        return _place_lineno_policy(lines, stored, False)
-    except Unsupported as first:
+        out = _place_lineno_policy(lines, stored, False)
+        if _lineno_lands(out, stored):
+            return out
+    except Unsupported as exc:
+        first = exc
+    landed = []
+    for place in (lambda: _place_lineno_policy(lines, stored, True),
+                  lambda: _place_lineno_recover(lines, stored),
+                  lambda: _place_lineno_solve(lines, stored)):
         try:
-            return _place_lineno_policy(lines, stored, True)
-        except Unsupported:
-            try:
-                return _place_lineno_recover(lines, stored)
-            except Unsupported:
-                raise first
+            out = place()
+        except Unsupported as exc:
+            if first is None:
+                first = exc
+            continue
+        if _lineno_lands(out, stored):
+            landed.append(out)
+    if landed:
+        # The first landing rule wins unless another lands in at least one
+        # line per fold fewer: that gap is padding, not where a pad sits.
+        shortest = min(len(out) for out in landed)
+        for out in landed:
+            if len(out) - shortest < len(stored):
+                return out
+    if first is None:
+        first = Unsupported(
+            "lineno_reconstruction_ahead: stored %d at reconstructed line %d"
+            % (stored[0], 0))
+    raise first
 
 
 def lift_program(mod):
@@ -20600,7 +22909,7 @@ def lift_program(mod):
                 out.extend(lift_section(sec))
         return _place_lineno(_strip_verbatim_marks(out), mod)
     nclass = len(ids)
-    secs = list(mod.sections)
+    secs = _without_table_phantoms(mod, list(mod.sections))
     if not secs:
         out = []
         for ident in ids:
@@ -20660,30 +22969,38 @@ def lift_program(mod):
         split_procs.append(procs[i:i + n])
         i += n
     leftover_procs = procs[i:]
+    # r306-classplace: each class-init registration index is an ordinal into
+    # the method directory, whose entry binds the member's section (oracle
+    # round306_cells: procedures before, between and after one or two classes —
+    # `a_before` stores 3, 4 for the class's methods behind two free
+    # procedures, `a_mixed` 2, 3 and 5). Where a free procedure's section
+    # stands ahead of a member's, the members are the bound sections and each
+    # class is emitted at its first member's place, so the recompile numbers
+    # them as stored.
+    placement = _index_placement(mod, secs, inits)
+    if placement is not None:
+        split_procs, walk = placement
+        leftover_procs = []
     while len(split_procs) < nclass:
         split_procs.append([])
     out = list(top)
+    spans = []
     index_leads = (bytes([S.CLASS_INIT_METHOD]),
                    bytes([S.CLASS_INIT_PROTECTED]),
                    bytes([S.CLASS_INIT_HIDDEN]))
     for ci, ident in enumerate(ids):
+        span_start = len(out)
         out.append(_class_header_line(ident))
         methods = list(ident.methods)
         vis = list(ident.method_vis)
         init = inits[ci] if ci < len(inits) else None
+        procs_ci = split_procs[ci] if ci < len(split_procs) else []
         pem_lines = []
-        pem_before = False
         if init is not None:
             pem_lines = [ln for ln in lift_section(init, keep_marks=True)
                          if _blank_or_payload(ln)]
-            # r46-classinit: HEIGHT= before PROCEDURE compiles to 54 then a2;
-            # PROCEDURE then HEIGHT compiles to a2 then 54. Emit PEMs first
-            # when the class-init section starts with a non-index statement.
-            if init.statements and init.statements[0].stream[:1] not in index_leads:
-                pem_before = True
-        if pem_before:
-            out.extend(pem_lines)
-        for pi, psec in enumerate(split_procs[ci] if ci < len(split_procs) else []):
+
+        def _emit_proc(pi, psec):
             body = [ln for ln in lift_section(psec, keep_marks=True)
                     if _blank_or_payload(ln)]
             name = methods[pi] if pi < len(methods) else ("_m%d" % (pi + 1))
@@ -20691,9 +23008,60 @@ def lift_program(mod):
             out.append("%sPROCEDURE %s" % (prefix, name))
             out.extend(body)
             out.append("ENDPROC")
-        if not pem_before:
-            out.extend(pem_lines)
+
+        # r301-classinitorder: a class body may interleave PEM assignments and
+        # member methods; the class-init records them in source order (54 for a
+        # PEM, a2/a3/9e for a method — oracle round301_cells `interleaved`). Emit
+        # the PEM lines and member PROCEDUREs in the class-init's own statement
+        # order so the recompiled class-init stream matches. r46-classinit's
+        # binary pem-before/after is the special case of a body that groups every
+        # PEM on one side; walking the stream reproduces it unchanged and adds the
+        # interleaved bodies. Fall back to the block order when the PEM lines do
+        # not align one-to-one with the non-index statements.
+        nonidx = ([st for st in init.statements
+                   if st.stream[:1] not in index_leads] if init is not None else [])
+        if init is not None and procs_ci and len(nonidx) == len(pem_lines):
+            pem_i = proc_i = 0
+            for st in init.statements:
+                if st.stream[:1] in index_leads:
+                    if proc_i < len(procs_ci):
+                        _emit_proc(proc_i, procs_ci[proc_i])
+                    proc_i += 1
+                else:
+                    out.append(pem_lines[pem_i])
+                    pem_i += 1
+            while proc_i < len(procs_ci):
+                _emit_proc(proc_i, procs_ci[proc_i])
+                proc_i += 1
+        else:
+            # r46-classinit: emit PEMs first when the class-init starts with a
+            # non-index statement, else after the member PROCEDUREs.
+            pem_before = bool(init is not None and init.statements
+                              and init.statements[0].stream[:1] not in index_leads)
+            if pem_before:
+                out.extend(pem_lines)
+            for pi, psec in enumerate(procs_ci):
+                _emit_proc(pi, psec)
+            if not pem_before:
+                out.extend(pem_lines)
         out.append("ENDDEFINE")
+        spans.append((span_start, len(out)))
+    if placement is not None:
+        blocks = [out[a:b] for a, b in spans]
+        out = list(top)
+        done = 0
+        for psec, name, owner in walk:
+            if owner is not None:
+                while done <= owner:
+                    out.extend(blocks[done])
+                    done += 1
+                continue
+            out.append("PROCEDURE %s" % name)
+            out.extend(ln for ln in lift_section(psec, keep_marks=True)
+                       if _blank_or_payload(ln))
+            out.append("ENDPROC")
+        for block in blocks[done:]:
+            out.extend(block)
     if leftover_procs:
         used = {n for ident in ids for n in ident.methods}
         extra_names = []
@@ -20714,6 +23082,125 @@ def lift_program(mod):
             out.extend(body)
             out.append("ENDPROC")
     return _place_lineno(_strip_verbatim_marks(out), mod)
+
+
+def _without_table_phantoms(mod, secs):
+    """r309-tablephantom: the sections less any that is a symbol table read as one.
+
+    A section's symbol table starts at its terminator + 2 as `55 <u16 count>
+    <u16 len> <name> …`. With three names, the first of three characters, those
+    first five bytes are `55 03 00 03 00`, which is also an empty section:
+    marker 55, length 3, terminator `03 00`. The container finds it and no
+    method-directory entry binds it. `LPARAMETERS abc, de / fq = abc + de` makes
+    one; `ab`, `abcd` or a fourth name do not (oracle round309_cells e01-e11,
+    sysmail.FXP section 3). It is not a section, so a class module's member
+    count and r306-classplace's binding skip it; the recompile of the same
+    procedure writes the same table again.
+    """
+    keep = [secs[0]] if secs else []
+    for prev, sec in zip(secs, secs[1:]):
+        off = sec.offset
+        if (sec.is_empty and prev.symbols_parsed and off == prev.end + 2
+                and off + 3 <= len(mod.data) and mod.data[off] == 0x55
+                and S.u16(mod.data, off + 1) == len(prev.symbols)):
+            continue
+        keep.append(sec)
+    return keep
+
+
+# r306b-dirbase: bytes between a method-directory u32's origin and the first
+# code section (round306b_cells: 77 - 40 under u16 framing, 79 - 42 under u32).
+_DIRECTORY_LEAD = 37
+
+
+def _index_placement(mod, secs, inits):
+    """r306-classplace: member sections by registration index, or None.
+
+    The method directory in front of the first class-init holds one entry per
+    procedure: `<u16 len> <name> <u32 section offset - base> <u16 member>
+    <u16 class>`, member 1 with the class's ordinal from 0, a free procedure
+    `00 00 ff ff` (oracle round306_cells). A registration index is an ordinal
+    into that directory, and the entry binds it to its section; base is the
+    first code section's offset less 37 (r306b-dirbase).
+
+    Returns (per-class member sections, walk), the walk listing every section
+    between the main body and the first class-init in source order as
+    (section, free-procedure name, owning class or None). None keeps
+    lift_program's count order: no index; an entry that binds no section of
+    that range, or a section of it no entry binds; an index that is not
+    strictly increasing, falls outside the directory or names an entry of
+    another class; or no free procedure standing ahead of a member, where the
+    count order is already the index order.
+    """
+    if not inits:
+        return None
+    first = next((k for k, sec in enumerate(secs) if sec is inits[0]), None)
+    if first is None or first < 2:
+        return None
+    entries = _member_directory(mod.data, secs[first - 1].end + 2,
+                                inits[0].offset)
+    at = {sec.offset: k for k, sec in enumerate(secs)}
+    # r306b-dirbase: the entry's u32 counts from 37 bytes ahead of the first
+    # code section, not from a fixed 40: a u16 module's first section at 77
+    # binds at 40, a u32 module's at 79 binds at 42 (oracle round306b_cells
+    # d_u32main, d_u32free), and a module whose first section sits at 40 binds
+    # at 3.
+    base = secs[0].offset - _DIRECTORY_LEAD
+    bound = {}
+    for name, rel, member, cls in entries:
+        k = at.get(rel + base)
+        if k is None or not 1 <= k < first or k in bound:
+            return None
+        bound[k] = (name, member, cls)
+    if len(bound) != first - 1:
+        return None
+    leads = (bytes([S.CLASS_INIT_METHOD]),
+             bytes([S.CLASS_INIT_PROTECTED]),
+             bytes([S.CLASS_INIT_HIDDEN]))
+    per, owner, flat = [], {}, []
+    for ci, sec in enumerate(inits):
+        ks = []
+        for st in sec.statements:
+            if st.stream[:1] not in leads or len(st.stream) < 7:
+                continue
+            n = int.from_bytes(st.stream[3:7], "little")
+            if not 1 <= n <= len(entries) or entries[n - 1][2:] != (1, ci):
+                return None
+            k = at[entries[n - 1][1] + base]
+            ks.append(k)
+            owner[k] = ci
+            flat.append(n)
+        per.append(ks)
+    if not flat or flat != sorted(set(flat)):
+        return None
+    free = [k for k in range(1, first) if k not in owner]
+    if any(bound[k][1] != 0 for k in free):
+        return None
+    if not free or free[0] > max(owner):
+        return None
+    walk = [(secs[k], bound[k][0], owner.get(k)) for k in range(1, first)]
+    return [[secs[k] for k in ks] for ks in per], walk
+
+
+def _member_directory(buf, start, stop):
+    """(name, u32, member flag, class) per method-directory entry, in order."""
+    pos = _skip_symbol_table(buf, start, stop)
+    out = []
+    while pos + 3 <= stop:
+        nlen = S.u16(buf, pos)
+        # The last entry's trailer runs past the class-init's offset, as
+        # _method_names allows.
+        if not (1 <= nlen <= 128) or pos + 2 + nlen + 8 > len(buf) \
+                or pos + 2 + nlen > stop:
+            break
+        name = _ident_bytes(buf[pos + 2:pos + 2 + nlen], dotted=True)
+        if name is None:
+            break
+        j = pos + 2 + nlen
+        out.append((name, int.from_bytes(buf[j:j + 4], "little"),
+                    S.u16(buf, j + 4), S.u16(buf, j + 6)))
+        pos = j + 8
+    return out
 
 
 def _docase_stray_end(stmts, i, stop, syms, code_base, first):
@@ -21296,6 +23783,20 @@ _BUILTIN_TABLES = {
 }
 
 
+def _emit_delete_cond(ast) -> str:
+    """A DELETE's FOR condition; r308-bracketword writes its lead string in brackets."""
+    if getattr(ast, "bracket_word", None) is None:
+        return _emit(ast.cond)
+    return _emit_bracket_lead(ast.cond)
+
+
+def _emit_bracket_lead(cond) -> str:
+    """A condition whose lead string is written in brackets."""
+    text = _emit(cond)
+    lead = _lead_str(cond)
+    return "[" + lead.text + "]" + text[len(_emit(lead)):]
+
+
 def _emit_vfp_string(text, dq):
     """VFP string literal. r44-codepage (vmlock r44-codepage):
 
@@ -21375,17 +23876,38 @@ def _emit_run(node):
     return "RUN " + text
 
 
-def _emit_isblank_arg(node):
-    """ISBLANK stores the byref flag for a plain argument.
+# r307-ownflag: the builtins that store the 0x18 flag on a field argument
+# themselves, where '@' is a compile error. Every other builtin's flag is the
+# author's '@' and renders as written: CREATEOBJECT, NEWOBJECT, EXECSCRIPT and
+# DODEFAULT accept '@a', '@m.a' and '@o.p' and wire 18 only for them (oracle
+# round307_cells c01-c07, n01-n03, e01-e04, d01-d05).
+# r309-ownflag: OBJNUM is the third. Of the 440 builtins in the registry, 421
+# compile with a name argument, and only ISBLANK, LOOKUP and OBJNUM flag a
+# plain, m. or o.p one (oracle round309_builtins.json). OBJNUM flags its first
+# argument when it is a plain or an m. name, never a path or its second, and
+# '@' on it is a compile error (round309_cells b01-b17).
+_OWN_FLAG_BUILTINS = {("builtin", 0x5A), ("bare_builtin", 0x7E),
+                      ("builtin", 0x09)}
+
+
+def _emit_own_flag_arg(node):
+    """ISBLANK, LOOKUP and OBJNUM store the byref flag for a plain argument.
 
     `ISBLANK(name)` wires `43 18 f7` and `ISBLANK(m.name)` wires
-    `43 18 f5 0d f7`. The '@' spelling of that flag is rejected, so the
-    flag renders without '@' only for builtin 0x5A.
+    `43 18 f5 0d f7`. LOOKUP flags its first and third arguments when each is
+    a plain name (`18 f7`) or a path (`18 f4 .. f7`), never an m. name or its
+    second or fourth argument (oracle round307_cells l01-l20, round304_cells
+    c22/c28). OBJNUM flags its first argument as a plain or m. name
+    (round309_cells b01-b05). The '@' spelling of that flag is rejected
+    (round307_cells i03, l16-l18; round309_cells b06-b09), so the flag renders
+    without '@' for these builtins.
     """
     if isinstance(node, ByrefMemvarRef):
         return "m." + node.name
     if isinstance(node, ByrefSym):
         return node.name
+    if isinstance(node, ByrefMemberPath):
+        return ".".join(node.names)
     return _emit(node)
 
 
@@ -21443,6 +23965,14 @@ def _emit(node):
             if node.op is not None else None
         if synthesised is not None:
             return synthesised
+        # r306-parenint: no token writes f9 for a value below 256, and every
+        # parenthesised token from 128 to 255 does, at the token's own width:
+        # `(134)` is f9 03 8600, `(0134)` f9 04 8600, `(00134)` f9 05 8600,
+        # where `134`, `0134` and `00134` are f8 (oracle round306_cells c128 to
+        # c255), measured to width 11 (`(00000000134)` f9 0b). Below 128 the
+        # parenthesised token stays f8.
+        if node.op == S.INT16 and 128 <= v <= 255 and len(node.spelling) <= w <= 11:
+            return "(%0*d)" % (w, v)
         dec = len(node.spelling)
         if w == dec:
             return node.spelling
@@ -21526,8 +24056,20 @@ def _emit(node):
             # the value's own rendering.
             synthesised = fold_preimages.for_float(
                 node.width, node.decimals, node.marked, v)
-            return synthesised if synthesised is not None else node.spelling
+            if synthesised is not None:
+                return synthesised
+            # r306-powfold: a power folds to `fa 0a <left decimals> <v> cc`
+            # whatever its operands, so an integral value under fa 0a 00 cc is
+            # written back as `v^1` (oracle round306_cells: `(32766^1)`,
+            # `32766^1`, `(0032766^1)` and `(2**1)` store one frame per value;
+            # measured to 2^53 - 1, `(9007199254740991^1)`).
+            if (node.marked and node.width == 10 and node.decimals == 0
+                    and _math.isfinite(v) and v == int(v) and abs(v) < 2 ** 53):
+                return "%d^1" % v
+            return node.spelling
         return "(%s)" % s if node.marked else s
+    if isinstance(node, ByrefMemberPath):
+        return "@" + ".".join(node.names)
     if isinstance(node, ByrefMemvarRef):
         # r41 a01: '@' + the m.-qualified name exactly — the paren form and
         # bare '@' are compiler-rejected m.-qualified too (e04/e05).
@@ -21614,8 +24156,12 @@ def _emit(node):
         return "@" + _emit(Call(node.func, node.args))
     if isinstance(node, Call):
         kind, which = node.func
-        if kind == "builtin" and which == 0x5A:
-            args = ", ".join(_emit_isblank_arg(a) for a in node.args)
+        if (kind, which) in _OWN_FLAG_BUILTINS:
+            # r304-byrefpath, r307-ownflag: an 18 flag there is the builtin's
+            # own stored flag — LOOKUP(o.p, x, o.q) wires 18 f4 .. f7 on both
+            # fields (round304_cells c22/c28), LOOKUP(a, b, c) 18 f7 on a and c
+            # (round307_cells l01) — and renders bare.
+            args = ", ".join(_emit_own_flag_arg(a) for a in node.args)
         else:
             args = ", ".join(_emit(a) for a in node.args)
         if kind == "user":
@@ -21648,9 +24194,12 @@ def _emit(node):
                                  ", ".join(_emit(a) for a in node.args),
                                  close_b)
         else:
-            text = "%s.%s%s%s%s" % (".".join(node.recv), node.name, open_b,
-                                    ", ".join(_emit(a) for a in node.args),
-                                    close_b)
+            # r309-withchain: the receiver may be rooted at an earlier link's
+            # call value, which renders as that call.
+            text = "%s.%s%s%s%s" % (
+                ".".join(p if isinstance(p, str) else _emit(p)
+                         for p in node.recv), node.name, open_b,
+                ", ".join(_emit(a) for a in node.args), close_b)
         if node.prop is not None:
             text += "." + node.prop
         return text
@@ -21950,6 +24499,8 @@ def _emit_line(ast):
                     txt += ", " + _emit(ast.key[1])
             return txt
         txt = "DEFINE BAR %s OF %s" % (ast.bar_num, ast.of_popup)
+        if ast.picture_first:
+            txt += " PICTURE " + _emit(ast.picture)
         if ast.prompt is not None:
             txt += " PROMPT " + _emit(ast.prompt)
         if ast.font:
@@ -21975,7 +24526,7 @@ def _emit_line(ast):
             txt += " COLOR SCHEME " + _emit(ast.scheme)
         if ast.mark is not None:
             txt += " MARK " + _emit(ast.mark)
-        if ast.picture is not None:
+        if ast.picture is not None and not ast.picture_first:
             txt += " PICTURE " + _emit(ast.picture)
         if ast.pictres is not None:
             txt += " PICTRES " + ast.pictres
@@ -22101,7 +24652,7 @@ def _emit_line(ast):
         return out + " TO " + ast.new
     if isinstance(ast, DeleteFor):
         head = "DELETE ALL FOR" if ast.all_scope else "DELETE FOR"
-        return "%s %s" % (head, _emit(ast.cond))
+        return "%s %s" % (head, _emit_delete_cond(ast))
     if isinstance(ast, DeleteScopeStmt):
         if ast.kind == "FILE":
             operand = ast.target if isinstance(ast.target, str) \
@@ -22128,9 +24679,11 @@ def _emit_line(ast):
             if ast.target is not None:
                 out += " " + _emit(ast.target)
         if ast.cond is not None:
-            out += " FOR " + _emit(ast.cond)
+            out += " FOR " + _emit_delete_cond(ast)
         if ast.while_cond is not None:
-            out += " WHILE " + _emit(ast.while_cond)
+            out += " WHILE " + (_emit_bracket_lead(ast.while_cond)
+                                if getattr(ast, "while_bracket", None)
+                                else _emit(ast.while_cond))
         if ast.alias is not None:
             out += " IN " + ast.alias
         if ast.nooptimize:
@@ -22241,7 +24794,35 @@ def _emit_line(ast):
         ahead = ""
         if getattr(ast, "all_first", False):
             ahead = "ALL" if ast.all_scope else "REST"
-        text = "REPLACE " + (ahead + " " if ahead else "") + body
+        lead = ahead
+        if getattr(ast, "in_ahead", None) == "lead":
+            # r312-inahead: IN stood ahead of the fields, behind an ALL there
+            lead = (ahead + " " if ahead else "") + "IN " + str(ast.in_spec)
+        elif getattr(ast, "in_ahead", None) == "before_all":
+            lead = "IN " + str(ast.in_spec) + " " + ahead
+        if getattr(ast, "for_ahead", False):
+            # r305-forahead: FOR stood ahead of the fields, IN after them
+            # (r312-inahead: or ahead of them, behind the FOR)
+            text = ("REPLACE " + (lead + " " if lead else "") + "FOR "
+                    + _emit(ast.for_cond) + " "
+                    + ("IN " + str(ast.in_spec) + " "
+                       if getattr(ast, "in_ahead", None) == "for" else "")
+                    + body)
+            first = getattr(ast, "for_ahead_first", None)
+            if first is None:
+                return text + _replace_tail(ast)
+            # r312-forscope: behind an ALL written ahead of it, and with the
+            # word the table numbers first leading the ones behind the fields
+            behind = [w for w, on in (
+                ("ALL", ast.all_scope and ahead != "ALL"),
+                ("REST", getattr(ast, "scope_word", None) == "REST"),
+                ("NOOPTIMIZE", ast.nooptimize)) if on]
+            if first == "IN":
+                return text + _replace_tail(ast) + "".join(" " + w for w in behind)
+            behind.remove(first)
+            return (text + " " + first + "".join(" " + w for w in behind)
+                    + _replace_tail(ast))
+        text = "REPLACE " + (lead + " " if lead else "") + body
         all_after = bool(ast.all_scope) and ahead != "ALL"
         scope_after = getattr(ast, "scope_word", None) is not None \
             and ahead != "REST"
@@ -22262,12 +24843,21 @@ def _emit_line(ast):
             if all_after:
                 text += " ALL"
             return text
+        if getattr(ast, "noopt_after_for", False):
+            # r308-nooptfor: FOR is the word the table interned after the
+            # fields, so it stands ahead of the ALL and the NOOPTIMIZE the
+            # source also wrote (ALL ahead of NOOPTIMIZE: round 223's
+            # trailing `NOOPTIMIZE ALL` swallows the ALL)
+            text += " FOR " + _emit_replace_for(ast)
+            if all_after:
+                text += " ALL"
+            return text + " NOOPTIMIZE" + _replace_tail(ast)
         if getattr(ast, "noopt_first", False):
             # r282-replacescope: NOOPTIMIZE is the word the table interned,
             # so it stands ahead of the ALL the source also wrote
             text += " NOOPTIMIZE" + (" ALL" if all_after else "")
         else:
-            if all_after:
+            if all_after and not getattr(ast, "in_before_all", False):
                 text += " ALL"
             if getattr(ast, "nooptimize", False):
                 # r223-replacenoopt: the wire stores 0x30 first whatever
@@ -22284,7 +24874,10 @@ def _emit_line(ast):
             if getattr(ast, "scope_count", None) is not None:
                 text += " " + _emit(ast.scope_count)
         if ast.for_cond is not None:
-            text += " FOR " + _emit(ast.for_cond)
+            text += " FOR " + _emit_replace_for(ast)
+        if getattr(ast, "in_before_all", False):
+            # r298-replaceinall: ALL follows the IN clause the table interned
+            return text + _replace_tail(ast) + " ALL"
         return text + _replace_tail(ast)
     if isinstance(ast, PublicStmt):
         return ("PRIVATE " if getattr(ast, "private", False) else "PUBLIC ") \
@@ -22577,10 +25170,14 @@ def _emit_line(ast):
             head += " " + ast.scope_word
             if getattr(ast, "scope_expr", None) is not None:
                 head += " " + _emit(ast.scope_expr)
-        if ast.cond is not None:
-            head += " FOR " + _emit(ast.cond)
-        if getattr(ast, "while_cond", None) is not None:
-            head += " WHILE " + _emit(ast.while_cond)
+        if getattr(ast, "while_first", False):
+            # r305-scanwhile: the table numbers WHILE's names first
+            head += " WHILE " + _emit(ast.while_cond) + " FOR " + _emit(ast.cond)
+        else:
+            if ast.cond is not None:
+                head += " FOR " + _emit(ast.cond)
+            if getattr(ast, "while_cond", None) is not None:
+                head += " WHILE " + _emit(ast.while_cond)
         lines = [head]
         lines += _indent(getattr(ast, "body", []))
         lines.append("ENDSCAN")
@@ -23022,14 +25619,17 @@ def _emit_line(ast):
                 line += " IN " + ast.in_target
             else:
                 line += " IN " + _emit(ast.in_target)
-        if ast.name_target is not None:
-            line += " NAME " + _emit(ast.name_target)
+        parts = []
         if ast.to_target is not None and not ast.with_first:
-            line += " TO " + _emit(ast.to_target)
+            parts.append(" TO " + _emit(ast.to_target))
         if ast.args and not ast.with_before_in:
-            line += " WITH " + ", ".join(_emit(a) for a in ast.args)
+            parts.append(" WITH " + ", ".join(_emit(a) for a in ast.args))
         if ast.to_target is not None and ast.with_first:
-            line += " TO " + _emit(ast.to_target)
+            parts.append(" TO " + _emit(ast.to_target))
+        if ast.name_target is not None:
+            # r310-nameorder: NAME stands where the table numbers it
+            parts.insert(ast.name_slot, " NAME " + _emit(ast.name_target))
+        line += "".join(parts)
         for fl in ast.flags or []:
             line += " " + fl
         return line

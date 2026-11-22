@@ -36,6 +36,27 @@ Immediately after the magic is a block of u32 fields, most of them section offse
 The front-header field layout is still not fully mapped — code sections are located by
 validation (§3) rather than by reading a length field.
 
+**The first section is where the header puts it** (round 313, r313-firstsection). An inner
+header begins at B = module + 41 in a standalone module (`.fxp`, `OBJCODE`, `system.app`) and
+at module + 4 in a program restored from a built EXE or APP: `u16 B` directory entries,
+`u16 B+2` classes, `u32 B+4` the offset from B of the first section's prologue, `u32 B+8` the
+procedure directory's offset from B (0, or a section's symbol-table end, in 194,686 of the 194,689
+scored modules the reader accepts), and line-table fields: `u32 B+24` to `u32 B+16` spans two bytes per line
+counted by `u32 B+20` in all 194,689. `u32 B+4` reads 37 in every module measured, whatever the
+code size (the 194,689, round 313's cells, round 307's 9 EXE/APP builds). The byte at B+36,
+which a u16 reading takes as the first section's marker, is the header's last byte (`0xfc` in
+most stored records, `0x85` from the oracle guest); a u32 prologue is `00 00 <u32 N>`. `u32 9`
+is the module length − 25 in every scored `OBJCODE` memo and every authored `.fxp` cell (not in
+`system.app`). `u16 39` is an XOR-affine function of bytes 0–38 alone (of 1,922 corpus headers
+left out of the fit, 1,919 predicted, 0 wrong, 3 outside the fitted span; 21 / 21 cells;
+`round313_checksum.json`). Header bytes can still validate as a section: `00 85 03` at 76,
+`00 00 <u16 39>` at 37, an empty u32 section at 9 when `u32 13` is 768, an empty u16 section at
+40 when the entry and class counts are both 3. The reader refuses all four. The first two run
+across the declared first section (r313-firstsection). The last two end before it and are the
+header's own fields (r314-nothingahead): in authored programs whose code is fixed, the section
+at 40 appears at exactly 3 entries and 3 classes (2 or 4 of either: none), and the section at 9
+at exactly `u32 13` = 768 (767, 769: none; a longer file stem moves `u32 9`, not `u32 13`).
+
 **Class identities are not in that front header.** Oracle r43-fxphdr: DEFINE CLASS name,
 AS base, and OLEPUBLIC live in a directory after the last section terminator and its
 `55` symbol table (count may be 0):

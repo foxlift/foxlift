@@ -1604,6 +1604,7 @@ SQLSEL_ORDER_MARK = (0xC7, 0xC3)
 SQLSEL_DESC_MARK = 0x3C
 SQLSEL_TOP_MARK = 0x29  # SELECT TOP n: 29 fc <n> [fd] before INTO (r42-seltop).
                         # Collides with GO TOP 0x29; SQL-local.
+SQLSEL_TOP_PERCENT_MARK = 0xC8  # r298-toppercent: TOP n PERCENT is c8 behind the TOP group.
 INSERT_FROM_NAME = 0x4A  # INSERT INTO <t> FROM NAME <obj>: 15 4a <name>
                          # beside the c2 MEMVAR selector (r47-insertforms)
 INSERT_ARRAY_MARK = 0x04  # INSERT INTO <t> FROM ARRAY <arr>: 15 04 <operand>
@@ -1693,6 +1694,7 @@ SQL_UNION_SUBLEAD = 0xC4  # second byte of the UNION-form SQL SELECT (6f c4 …)
 SQL_UNION_ALL_MARK = 0x03  # optional ALL after c4; absent is plain UNION (r74-union)
 SQL_UNION_LEN_MARK = 0xE8  # then a u24; not a sum-of-names gate (r74-union)
 SQL_UNION_CONST = (0x03, 0xE8)  # ALL + length marker; ALL is optional (r74-union)
+SQL_SELECT_ALL_MARK = 0x03  # SELECT ALL: 6f 03 15 … (r308-selectall)
 SQL_DISTINCT_MARK = 0xBE  # SELECT DISTINCT: 6f be 15 … [bc bd INTO]
                           # (r42-seldistinct). Per-arm DISTINCT under UNION
                           # (6f c4) is the same mark. No-INTO DISTINCT is
